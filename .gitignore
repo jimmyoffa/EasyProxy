@@ -28,3 +28,21 @@ config.json
 /output
 /node_modules
 package-lock.json
+
+# Secrets locali (in CI vanno nei secret, mai committati)
+.env.local
+
+# Python (oltre a *.pyc sopra)
+__pycache__/
+*.pyo
+
+# Ambienti virtuali locali
+venv/
+ENV/
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Log locali
+*.log
