@@ -234,15 +234,16 @@ class DLStreamsExtractor(BaseExtractor):
             ]
         # Default: prioritize Player 2 (/cast/) because it provides clean native MPEG-TS (.ts)
         # without the heavy (7MB+) PNG-wrapped TikTok CDN overhead and frequent 403s of Player 1.
-        # Exception: 861 always tries Player 1 first, even when its Player 2 looks
-        # online in a browser. That backend serves a technically valid stream (HTTP 200,
-        # valid MPEG-TS container, advancing timestamps, decodable-looking frames) whose
-        # video track is unplayable, so every cheap liveness probe promotes it while
-        # playback shows green/black with working audio. The failure only surfaces at
-        # decode time, which no proxy-side check can afford to replicate -- every
-        # simpler approach was tried and discarded, this pin is the fix.
-        first = "stream" if channel_id == "861" else "cast"
-        second = "cast" if channel_id == "861" else "stream"
+        # Exception: the channels below always try Player 1 first, even when their
+        # Player 2 looks online in a browser. That backend serves a technically valid
+        # stream (HTTP 200, valid MPEG-TS container, advancing timestamps,
+        # decodable-looking frames) whose video track is unplayable, so every cheap
+        # liveness probe promotes it while playback shows green/black with working
+        # audio. The failure only surfaces at decode time, which no proxy-side check
+        # can afford to replicate -- every simpler approach was tried and discarded,
+        # this pin is the fix.
+        first = "stream" if channel_id in ("861", "868") else "cast"
+        second = "cast" if channel_id in ("861", "868") else "stream"
         return [
             f"{origin}/{first}/stream-{channel_id}.php",
             f"{origin}/{second}/stream-{channel_id}.php",
