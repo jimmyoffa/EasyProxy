@@ -22,12 +22,14 @@ from services.proxy_shared import (
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     ClientTimeout,
+    ManifestRewriter,
     get_public_base_url,
     logger,
     web,
 )
 from services.dual import service as dual_service
 from services.dual.security import resolves_publicly, valid_public_url
+from services.dual.video import video_track_id
 
 
 class DualLinksError(Exception):
@@ -620,7 +622,7 @@ class HLSProxyDualMixin:
         return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
     @staticmethod
-    def _dual_video_proxy_url(request, video_url: str, video: dict) -> str:
+    def _dual_video_proxy_url(request, video_url: str, video: dict, track_id: int = 0) -> str:
         params = {
             "url": video_url,
             "redirect_stream": "true",
@@ -636,6 +638,8 @@ class HLSProxyDualMixin:
             params["proxy"] = video["forced_proxy"]
         if video.get("stream_key"):
             params["stream_key"] = video["stream_key"]
+        if track_id:
+            params["dual_video_track"] = str(track_id)
         api_password = request.query.get("api_password")
         if api_password:
             params["api_password"] = api_password
@@ -940,7 +944,32 @@ class HLSProxyDualMixin:
         }
         if bridge_used:
             result["sync_bridge"] = "eng"
-        result["video_url"] = self._dual_video_proxy_url(request, video_url, video)
+        # Discover the actual video ID; do not assume that video is track 1.
+        video_media = dict(video, url=video_url, manifest="")
+        media_text, media_base = await self._manifest(video_media)
+        map_line = next((line for line in media_text.splitlines() if line.startswith("#EXT-X-MAP:")), "")
+        map_uri = re.search(r'URI="([^"]+)"', map_line)
+        track_id = 0
+        if map_uri:
+            init_url = ManifestRewriter._inherit_query_if_missing(
+                urljoin(media_base, map_uri.group(1)), urllib.parse.urlparse(media_base).query
+            )
+            init_source = dict(video_media, url=init_url)
+            byte_range = re.search(r'BYTERANGE="(\d+)(?:@(\d+))?"', map_line)
+            if byte_range:
+                length = int(byte_range.group(1))
+                start = int(byte_range.group(2) or 0)
+                init_source["headers"] = dict(video_media.get("headers") or {})
+                init_source["headers"]["Range"] = f"bytes={start}-{start + length - 1}"
+            init_bytes, _ = await self._fetch_dual(init_source, binary=True)
+            if byte_range and len(init_bytes) != length:
+                # Some origins ignore Range and return the complete object.
+                init_bytes = init_bytes[start:start + length]
+            try:
+                track_id = video_track_id(init_bytes)
+            except ValueError as exc:
+                raise DualLinksError(502, str(exc)) from exc
+        result["video_url"] = self._dual_video_proxy_url(request, video_url, video, track_id)
         result["m3u8"] = self._dual_master(result)
         return result
 

@@ -430,6 +430,7 @@ class ManifestRewriter:
         extractor_key: str = None,
         stream_key: str = None,
         max_res: bool = False,
+        dual_video_track: int = 0,
     ) -> str:
         """Riscrive gli URL nei manifest HLS per passare attraverso il proxy."""
         lines = manifest_content.split("\n")
@@ -481,6 +482,8 @@ class ManifestRewriter:
                 ]
             )
 
+            if dual_video_track:
+                header_params += f"&dual_video_track={int(dual_video_track)}"
             if api_password:
                 header_params += f"&api_password={api_password}"
             
@@ -644,6 +647,8 @@ class ManifestRewriter:
             header_params += f"&extractor_key={urllib.parse.quote(extractor_key, safe='')}"
         if stream_key:
             header_params += f"&stream_key={urllib.parse.quote(stream_key, safe='')}"
+        if dual_video_track:
+            header_params += f"&dual_video_track={int(dual_video_track)}"
         if max_res:
             header_params += "&max_res=true"
 

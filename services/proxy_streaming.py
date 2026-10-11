@@ -5,6 +5,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import aiohttp
+from services.dual.video import byte_range, video_only
 import config_store
 import config as _config
 from config import PROXY_SOURCE_LIST, find_first_alive_async, is_proxy_alive
@@ -742,6 +743,12 @@ class HLSProxyStreamingMixin:
     async def _proxy_stream(self, request, stream_url, stream_headers, bypass_warp=None, forced_proxy=None, force_direct=None, extractor_key=None, stream_key=None):
         """Effettua il proxy dello stream con gestione manifest e AES-128"""
         is_hls_segment_request = request.path.startswith("/proxy/hls/segment.")
+        try:
+            dual_video_track = int(request.query.get("dual_video_track", "0"))
+            if not 0 <= dual_video_track <= 0xffffffff:
+                raise ValueError()
+        except ValueError:
+            return web.Response(status=400, text="Invalid DUAL video track")
         if bypass_warp is None:
             bypass_warp = request.query.get("warp", "").lower() == "off"
         bypass_proxies = request.query.get("proxy", "").lower() == "off"
@@ -841,6 +848,12 @@ class HLSProxyStreamingMixin:
                 keys_to_remove = [k for k in headers.keys() if k.lower() == h]
                 for k in keys_to_remove: del headers[k]
 
+            dual_video_range = next((value for name, value in headers.items() if name.lower() == "range"), None)
+            if dual_video_track:
+                # Filtering needs complete boxes. Slice the filtered response
+                # afterwards; equal-size free boxes preserve byte-range offsets.
+                headers = {name: value for name, value in headers.items() if name.lower() not in {"range", "if-none-match", "if-modified-since"}}
+
             # Manifest requests must be fetched in full. Some players probe the
             # entry URL with a byte range, which turns upstream playlists into
             # partial 206 responses and breaks rewriting.
@@ -918,7 +931,7 @@ class HLSProxyStreamingMixin:
                 headers["Accept-Encoding"] = "identity"
 
             if is_hls_segment_request and self._segment_coalesce_eligible(request):
-                coalesce_key = self._segment_coalesce_key(stream_url, headers)
+                coalesce_key = (self._segment_coalesce_key(stream_url, headers), dual_video_track)
                 inflight = self._segment_inflight_map()
                 pending = inflight.get(coalesce_key)
                 if pending is not None:
@@ -1265,6 +1278,17 @@ class HLSProxyStreamingMixin:
                                                 logger.info("✅ Transient CDN 403 resolved on retry %d for %s", att + 1, stream_url.split('/')[-1].split('?')[0])
                                                 q_body = await quick_resp.read()
                                                 q_headers = dict(quick_resp.headers)
+                                                if dual_video_track:
+                                                    try:
+                                                        q_body = await asyncio.to_thread(video_only, q_body, dual_video_track)
+                                                    except ValueError:
+                                                        return web.Response(status=502, text="Invalid DUAL fMP4 segment", headers={"Access-Control-Allow-Origin": "*"})
+                                                    q_body, q_status, q_range = byte_range(q_body, dual_video_range)
+                                                    q_headers = {name: value for name, value in q_headers.items() if name.lower() not in {"content-range", "content-length", "etag", "last-modified", "content-encoding", "transfer-encoding"}}
+                                                    q_headers.update({"Content-Type": "video/mp4", "Access-Control-Allow-Origin": "*", "Accept-Ranges": "bytes"})
+                                                    if q_range:
+                                                        q_headers["Content-Range"] = q_range
+                                                    return web.Response(body=q_body, status=q_status, headers=q_headers)
                                                 q_headers["Access-Control-Allow-Origin"] = "*"
                                                 is_image = q_headers.get("content-type", "").startswith("image/") or q_body[:8] == b"\x89PNG\r\n\x1a\n"
                                                 if is_image or request.path.endswith(".ts") or stream_url.endswith(".ts"):
@@ -1342,7 +1366,7 @@ class HLSProxyStreamingMixin:
                     or self._is_image_url(stream_url)
                 )
 
-                if (is_direct_media_stream or is_segment_like) and not is_image_payload:
+                if (is_direct_media_stream or is_segment_like) and not is_image_payload and not dual_video_track:
                     stream_ext = os.path.splitext(stream_url.split("?", 1)[0].lower())[1]
                     is_fmp4_segment = stream_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
                     # fMP4 has its own init box: never treat it as image-wrapped.
@@ -1514,6 +1538,7 @@ class HLSProxyStreamingMixin:
                         extractor_key=extractor_key or request.query.get("extractor_key"),
                         stream_key=stream_key or request.query.get("stream_key"),
                         max_res=self._request_forces_max_res(request, extractor_key, "hls"),
+                        dual_video_track=dual_video_track,
                     )
                     return web.Response(text=rewritten, headers={
                         "Content-Type": "application/vnd.apple.mpegurl",
@@ -1665,6 +1690,13 @@ class HLSProxyStreamingMixin:
                     )
                     segment_was_stripped = len(content_bytes) != original_len
 
+                if dual_video_track:
+                    try:
+                        content_bytes = await asyncio.to_thread(video_only, content_bytes, dual_video_track)
+                    except ValueError as exc:
+                        logger.warning("DUAL video filtering failed: %s", exc)
+                        return web.Response(status=502, text="Invalid DUAL fMP4 segment", headers={"Access-Control-Allow-Origin": "*"})
+
                 response_headers = {}
 
                 for header in [
@@ -1677,6 +1709,14 @@ class HLSProxyStreamingMixin:
                 ]:
                     if header in response_source_headers:
                         response_headers[header] = response_source_headers[header]
+
+                if dual_video_track:
+                    response_headers = {name: value for name, value in response_headers.items() if name.lower() not in {"content-range", "etag", "last-modified"}}
+                    set_response_header(response_headers, "Content-Type", "video/mp4")
+                    set_response_header(response_headers, "Accept-Ranges", "bytes")
+                    content_bytes, response_status, filtered_range = byte_range(content_bytes, dual_video_range)
+                    if filtered_range:
+                        set_response_header(response_headers, "Content-Range", filtered_range)
 
                 # ✅ FIX: Forza Content-Type coerente se il server non lo invia correttamente
                 if (
