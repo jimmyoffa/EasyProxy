@@ -112,6 +112,15 @@ class PlaylistBuilder:
                 elif 'vavoo.to' in logical_line:
                     encoded_url = urllib.parse.quote(logical_line, safe='')
                     processed_url_content = f"{base_url}/proxy/manifest.m3u8?url={encoded_url}"
+                elif 'livetv.sx' in logical_line or 'livetv' in logical_line:
+                    encoded_url = urllib.parse.quote(logical_line, safe='')
+                    processed_url_content = f"{base_url}/extractor/video.m3u8?host=livetv&redirect_stream=true&d={encoded_url}"
+                elif 'sportsonline' in logical_line:
+                    encoded_url = urllib.parse.quote(logical_line, safe='')
+                    processed_url_content = f"{base_url}/extractor/video.m3u8?host=sportsonline&redirect_stream=true&d={encoded_url}"
+                elif 'fctv33' in logical_line or 'mpgreatestclgczbmiddle' in logical_line:
+                    encoded_url = urllib.parse.quote(logical_line, safe='')
+                    processed_url_content = f"{base_url}/extractor/video.m3u8?host=fctv33&redirect_stream=true&d={encoded_url}"
                 elif '.m3u8' in logical_line:
                     encoded_url = urllib.parse.quote(logical_line, safe='')
                     processed_url_content = f"{base_url}/proxy/manifest.m3u8?url={encoded_url}"

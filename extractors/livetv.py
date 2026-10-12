@@ -23,7 +23,10 @@ class LiveTVExtractor(BaseExtractor):
         """Extract LiveTV URL and required headers."""
         self._apply_routing_kwargs(url, kwargs)
         try:
-            resp = await self._make_request(url)
+            if "livetv.sx" in url.lower() or "webplayer" in url.lower() or "emb.apl" in url.lower():
+                return await self._extract_livetvsx(url, stream_title)
+
+            resp = await self._make_request(url, ssl=False)
             response_text = resp.text
             
             self.base_headers["referer"] = urljoin(url, "/")
@@ -31,7 +34,9 @@ class LiveTVExtractor(BaseExtractor):
             # Extract player API details
             player_api_base, method = await self._extract_player_api_base(response_text)
             if not player_api_base:
-                raise ExtractorError("Failed to extract player API URL")
+                # Fallback to livetv.sx logic if player_api is missing
+                return await self._extract_livetvsx(url, stream_title)
+
 
             # Get player options
             options_data = await self._get_player_options(response_text)
@@ -80,6 +85,118 @@ class LiveTVExtractor(BaseExtractor):
 
         except Exception as e:
             raise ExtractorError(f"Extraction failed: {str(e)}")
+
+    async def _extract_livetvsx(self, url: str, stream_title: str = None) -> dict:
+        """Extract stream from livetv.sx (event page or webplayer URL)."""
+        # Event page resolution
+        if "/eventinfo/" in url:
+            resp = await self._make_request(url, ssl=False, headers={"Referer": "https://livetv.sx/"})
+            html = resp.text
+            matches = re.findall(r'<a[^>]+href=["\'](/webplayer[^"\']+)["\']', html)
+            if not matches:
+                matches = re.findall(r'<a[^>]+href=["\'](https?://[^"\']*webplayer[^"\']+)["\']', html)
+            if not matches:
+                raise ExtractorError("No webplayer links found in livetv.sx event page")
+            
+            chosen_url = None
+            if stream_title:
+                for tr_match in re.finditer(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL):
+                    tr_text = tr_match.group(1)
+                    if stream_title.lower() in tr_text.lower():
+                        link_match = re.search(r'href=["\'](/webplayer[^"\']+)["\']', tr_text)
+                        if link_match:
+                            chosen_url = urljoin(url, link_match.group(1))
+                            break
+            
+            if not chosen_url:
+                # Prioritize Italian flag: linkflag/12.png
+                for tr_match in re.finditer(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL):
+                    tr_text = tr_match.group(1)
+                    if "linkflag/12.png" in tr_text or "italian" in tr_text.lower():
+                        link_match = re.search(r'href=["\'](/webplayer[^"\']+)["\']', tr_text)
+                        if link_match:
+                            chosen_url = urljoin(url, link_match.group(1))
+                            break
+            
+            if not chosen_url:
+                chosen_url = urljoin(url, matches[0])
+            url = chosen_url
+
+        # Now url is a webplayer URL
+        resp_wp = await self._make_request(url, ssl=False, headers={"Referer": "https://livetv.sx/"})
+        wp_html = resp_wp.text
+
+        # 1. Check for dlive / ifr
+        dlive_match = re.search(r'<iframe[^>]+src=["\']((?:https?:)?//(?:www\.)?dlive\.sx/[^"\']+)["\']', wp_html, re.I)
+        if dlive_match:
+            dlive_url = dlive_match.group(1).replace("\n", "").replace("\r", "").strip()
+            if dlive_url.startswith("//"):
+                dlive_url = "https:" + dlive_url
+            from extractors.dlstreams import DLStreamsExtractor
+            dl_extractor = DLStreamsExtractor(self.request_headers, proxies=self.proxies)
+            return await dl_extractor.extract(dlive_url)
+
+        # 2. Check for alieztv / emb.*
+        emb_match = re.search(r'<iframe[^>]+src=["\']((?:https?:)?//emb\.[^"\']+)["\']', wp_html, re.I)
+        if emb_match:
+            emb_url = emb_match.group(1).replace("\n", "").replace("\r", "").strip()
+            if emb_url.startswith("//"):
+                emb_url = "https:" + emb_url
+            resp_emb = await self._make_request(emb_url, ssl=False, headers={"Referer": "https://livetv.sx/"})
+            m3u8_match = re.search(r'pl\.init\([\'\"](//[^\'\"]+\.m3u8[^\'\"]*)[\'\"]', resp_emb.text)
+            if not m3u8_match:
+                m3u8_match = re.search(r'[\'\"](//[^\'\"]+\.m3u8[^\'\"]*)[\'\"]', resp_emb.text) or re.search(r'[\'\"](https?://[^\'\"]+\.m3u8[^\'\"]*)[\'\"]', resp_emb.text)
+            if m3u8_match:
+                final_m3u8 = m3u8_match.group(1).replace("\n", "").replace("\r", "").strip()
+                if final_m3u8.startswith("//"):
+                    final_m3u8 = "https:" + final_m3u8
+                return {
+                    "destination_url": final_m3u8,
+                    "request_headers": {"User-Agent": self.base_headers["User-Agent"], "Referer": emb_url},
+                    "mediaflow_endpoint": "hls_proxy",
+                    "selected_proxy": self.last_used_proxy,
+                    "force_direct": self._force_direct,
+                    "bypass_warp": self.bypass_warp_active,
+                }
+
+        # 3. Direct m3u8 in html
+        any_m3u8 = re.search(r'["\'](https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)["\']', wp_html)
+        if any_m3u8:
+            return {
+                "destination_url": any_m3u8.group(1),
+                "request_headers": self.base_headers,
+                "mediaflow_endpoint": "hls_proxy",
+                "selected_proxy": self.last_used_proxy,
+                "force_direct": self._force_direct,
+                "bypass_warp": self.bypass_warp_active,
+            }
+
+        # 4. Check other player iframes
+        player_iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', wp_html, re.I)
+        for ifr in player_iframes:
+            ifr_clean = ifr.replace("\n", "").replace("\r", "").strip()
+            if any(ad in ifr_clean.lower() for ad in ["banner", "getbanner", "ads.", "links", "cpxinteractive"]):
+                continue
+            if ifr_clean.startswith("//"):
+                ifr_clean = "https:" + ifr_clean
+            elif ifr_clean.startswith("/"):
+                ifr_clean = urljoin(url, ifr_clean)
+            try:
+                resp_sub = await self._make_request(ifr_clean, ssl=False, headers={"Referer": url})
+                sub_m3u8 = re.search(r'["\'](https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)["\']', resp_sub.text)
+                if sub_m3u8:
+                    return {
+                        "destination_url": sub_m3u8.group(1),
+                        "request_headers": {"User-Agent": self.base_headers["User-Agent"], "Referer": ifr_clean},
+                        "mediaflow_endpoint": "hls_proxy",
+                        "selected_proxy": self.last_used_proxy,
+                        "force_direct": self._force_direct,
+                        "bypass_warp": self.bypass_warp_active,
+                    }
+            except Exception:
+                pass
+
+        raise ExtractorError("Could not extract stream from livetv.sx")
 
     async def _extract_player_api_base(self, html_content: str):
         """Extract player API base URL and method."""

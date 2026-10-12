@@ -26,7 +26,7 @@ AES_IV = b"8017d3a8f1400d2f"
 DEFAULT_DATA_API_BASE = "https://apis-data10.tcpwe138stya.ru"
 DEFAULT_PLAYER_REFERER = "https://nadia01eo.tn76degree12ec3out.cfd/"
 DEFAULT_STREAM_DIGIT = "seth"
-SITE_URL = "https://www.fctv33hd.rest"
+DOMAINS_CONFIG_URL = "https://raw.githubusercontent.com/realbestia1/domains/refs/heads/main/domains.json"
 
 # sport slug (event page path segment) -> sportType id (from site JS enum: ST_FOOTBALL=1 ...)
 SPORT_SLUG_MAP = {
@@ -498,12 +498,20 @@ class Fctv33Extractor(BaseExtractor):
                 return
             try:
                 session = await self._get_session(self.data_api_base)
+                site_url = ""
+                try:
+                    cfg_resp = await self._make_request(
+                        DOMAINS_CONFIG_URL, headers={"Accept": "application/json"}, retries=1)
+                    site_url = str(cfg_resp.json.get("fctv33") or "").strip().rstrip("/")
+                except Exception as e:
+                    logger.warning(f"Fctv33Extractor: Failed to fetch domains config ({e}), no Referer/Origin")
                 cfg_url = f"{self.data_api_base}/api/common/params"
                 headers = {
                     "User-Agent": self.base_headers["User-Agent"],
-                    "Referer": f"{SITE_URL}/",
-                    "Origin": SITE_URL,
                 }
+                if site_url:
+                    headers["Referer"] = f"{site_url}/"
+                    headers["Origin"] = site_url
                 async with session.get(cfg_url, headers=headers, timeout=ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         text = await resp.text()

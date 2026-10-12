@@ -1843,7 +1843,7 @@ class HLSProxyStreamingMixin:
                         "WARP proxy healthy; stream failure is upstream source [%s]",
                         log_context(active_proxy),
                     )
-            if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSL" in str(e) or "ssl" in str(e):
+            if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSLCertVerificationError" in str(e) or "CertificateError" in str(e):
                 try:
                     host = urllib.parse.urlparse(stream_url).netloc.split(":")[0]
                     parts = host.split(".")
