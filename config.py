@@ -46,7 +46,7 @@ _SOCKET_CHECK_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-APP_VERSION = "2.13.36"
+APP_VERSION = "2.13.37"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None

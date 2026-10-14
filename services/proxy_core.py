@@ -631,40 +631,74 @@ class HLSProxyCoreMixin:
 
         daddyliveplayer.st / dlive.sx obfuscate premium channels by shipping
         every segment as a WebP/PNG image. The real TS payload is either the
-        EXIF chunk (WebP), the bytes after the PNG IEND chunk, or a gzip
+        EXIF chunk (WebP), the bytes after the PNG IEND chunk, a gzip
         payload hidden in the PNG pixel data behind a "TIKTIKPX" magic and a
-        big-endian length. Mirrors the provider's own JS unwrapper.
+        big-endian length, a raw payload behind "TIKTIKRAW", a gzip payload
+        behind "TIKTIKTSGZ", or plain TS bytes detectable via the 0x47 sync
+        pattern. Mirrors the provider's own JS unwrapper (unwrap/webpExifTS/
+        pngIendTS/unwrapPixels + TRAW/TSGZ/generic 0x47 scan).
         """
         if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
             return HLSProxyCoreMixin._webp_exif_ts(content)
-        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
-            return None
+        is_png = content.startswith(b"\x89PNG\r\n\x1a\n")
 
-        trailing = HLSProxyCoreMixin._png_trailing_ts(content)
-        if trailing is not None:
-            return trailing
+        if is_png:
+            trailing = HLSProxyCoreMixin._png_trailing_ts(content)
+            if trailing is not None:
+                return trailing
 
-        try:
-            import io
-            from PIL import Image
-            raw = Image.open(io.BytesIO(content)).convert("RGB").tobytes()
-        except Exception:
-            return None
-        if raw[:8] != b"TIKTIKPX":
-            return None
-        length = int.from_bytes(raw[8:12], "big")
-        if length < 2 or 12 + length > len(raw):
-            return None
-        gz = raw[12:12 + length]
-        if gz[:2] != b"\x1f\x8b":
-            return None
-        try:
-            ts = gzip.decompress(gz)
-        except Exception:
-            return None
-        if len(ts) <= 188 or ts[0] != 0x47 or ts[188] != 0x47:
-            return None
-        return ts
+            try:
+                import io
+                from PIL import Image
+                raw = Image.open(io.BytesIO(content)).convert("RGB").tobytes()
+            except Exception:
+                raw = None
+            if raw is not None:
+                if raw[:8] == b"TIKTIKPX":
+                    length = int.from_bytes(raw[8:12], "big")
+                    if 2 <= length <= len(raw) - 12:
+                        gz = raw[12:12 + length]
+                        if gz[:2] == b"\x1f\x8b":
+                            try:
+                                ts = gzip.decompress(gz)
+                            except Exception:
+                                ts = None
+                            if ts is not None and len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
+                                return ts
+            # PNG without a recognized payload: fall through to the raw
+            # magic / generic sync scan below (mirrors the JS unwrapper,
+            # which keeps searching TRAW/TSGZ/0x47 on the raw file bytes).
+
+        # Raw TS behind the "TIKTIKRAW" magic (JS: TRAW, first byte 0x47).
+        # Require the +188 sync as well to avoid false positives.
+        traw = content.find(b"TIKTIKRAW")
+        if traw != -1:
+            ts = content[traw + len(b"TIKTIKRAW"):]
+            if len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
+                return bytes(ts)
+
+        # Gzip TS behind the "TIKTIKTSGZ" magic (JS: TSGZ -> gunzip).
+        tsgz = content.find(b"TIKTIKTSGZ")
+        if tsgz != -1:
+            try:
+                ts = gzip.decompress(content[tsgz + len(b"TIKTIKTSGZ"):])
+            except Exception:
+                ts = None
+            if ts is not None and len(ts) > 188 and ts[0] == 0x47 and ts[188] == 0x47:
+                return ts
+
+        # Generic fallback (JS: first 0x47 with another 0x47 at +188).
+        # Use find() iteration (C speed) and require a third sync at +376
+        # when available to avoid false positives inside PNG bytes.
+        pos = content.find(b"\x47")
+        end = len(content) - 188
+        while pos != -1 and pos <= end:
+            if content[pos + 188] == 0x47 and (
+                len(content) <= pos + 376 or content[pos + 376] == 0x47
+            ):
+                return bytes(content[pos:])
+            pos = content.find(b"\x47", pos + 1, end + 1)
+        return None
 
     @staticmethod
     def _strip_fake_png_header_from_ts(content: bytes) -> bytes:
@@ -915,7 +949,15 @@ class HLSProxyCoreMixin:
                     retire_session(self, p_sess)
 
         proxy = None if force_direct else (forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp))
-        if not proxy and not force_direct and not _config.is_direct_connection_allowed(bypass_warp):
+        # A host explicitly excluded from WARP with no proxy left in the chain has
+        # only one route: direct. Without this, warp_exclude_domains + proxy=off is
+        # a dead end ("No proxy route available") instead of the split routing it
+        # declares (e.g. daddy hosts via WARP, TikTok CDN direct, whose WARP egress
+        # is banned while the server IP is clean). Untouched otherwise.
+        direct_ok = _config.is_direct_connection_allowed(bypass_warp) or (
+            not proxy and _config._is_warp_excluded(url or "")
+        )
+        if not proxy and not force_direct and not direct_ok:
             raise aiohttp.ClientConnectionError(
                 "No proxy route available; direct fallback disabled"
             )
