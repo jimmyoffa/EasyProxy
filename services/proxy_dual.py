@@ -353,6 +353,7 @@ class HLSProxyDualMixin:
                 timeout=ClientTimeout(total=45, connect=15, sock_connect=15, sock_read=45),
             ) as response:
                 if response.status >= 400:
+                    logger.warning("[DUAL] source fetch failed: %s -> HTTP %s", url, response.status)
                     raise DualLinksError(502, f"source returned HTTP {response.status}")
                 final_url = str(response.url)
                 if binary:
@@ -559,9 +560,9 @@ class HLSProxyDualMixin:
                 "extractor_name": source.get("extractor_name") or "",
             },
         )
-        # cleanup_idle evicts tracks after 30s without segment requests, and a
-        # bridge sync can keep this track idle far longer. Pin it until the
-        # DUAL build finishes (unpinned by the caller).
+        # cleanup_idle evicts tracks after TRACK_IDLE_SECONDS without segment
+        # requests, and a bridge sync can keep this track idle far longer.
+        # Pin it until the DUAL build finishes (unpinned by the caller).
         hid = str(prepared.get("hid") or "")
         if hid:
             dual_service.audio.pin(hid)

@@ -34,6 +34,7 @@ class DroploadExtractor(BaseExtractor):
     """
 
     TURNSTILE_TABS = 1
+    REQUEST_TIMEOUT_TOTAL = 90
     # The Turnstile solve happens in an IPv4-only browser and the cleared
     # ``vcap`` marker is IP-bound, so every request must leave via IPv4.
     force_ipv4 = True

@@ -57,7 +57,9 @@ class _Session:
 
 
 class SessionManager:
-    IDLE_TIMEOUT_SECONDS = 60
+    # The token travels inside the player's playlist URLs, so it must survive
+    # long pauses and slow 4K buffering: expire on the TTL, not on idle.
+    IDLE_TIMEOUT_SECONDS = 21600
 
     def __init__(self, ttl_seconds: int = 21600, fixed_token: str = ""):
         self.ttl_seconds = max(300, int(ttl_seconds))
