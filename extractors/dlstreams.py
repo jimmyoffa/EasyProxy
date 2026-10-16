@@ -93,6 +93,12 @@ class DLStreamsExtractor(BaseExtractor):
     STREAM_CACHE_SECONDS = 30.0
     STREAM_CACHE_STALE_SECONDS = 300.0
     STREAM_CACHE_FAIL_BACKOFF_SECONDS = 15.0
+    # Source-switch hysteresis: an isolated single-cycle validation failure
+    # (e.g. an intermittent TikTok 403) must not flip playback to another
+    # source mid-stream. A move to a lower-preference player is deferred for
+    # this many consecutive rounds while the last-served URL still probes
+    # alive; moves up (or to the same source) always win immediately.
+    SOURCE_DAMP_STRIKES = 1
     MAX_HOST_BACKOFF_SECONDS = 3600.0
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
@@ -114,6 +120,10 @@ class DLStreamsExtractor(BaseExtractor):
         self.bypass_warp_active = bypass_warp
         self._inflight_extract_tasks: dict = {}
         self._stream_cache: dict = {}
+        # Source-switch hysteresis state (per channel_key): last served player
+        # page and consecutive deferred down-moves. See _damp_downmove.
+        self._last_served_candidate: dict = {}
+        self._downmove_strikes: dict = {}
         # host -> monotonic deadline: honour upstream Retry-After instead of
         # scraping a host that already said "too many requests".
         self._host_backoff: dict[str, float] = {}
@@ -571,7 +581,37 @@ class DLStreamsExtractor(BaseExtractor):
             "bypass_warp": self.bypass_warp_active,
         }
 
-    async def _extract_directly(self, url: str, channel_id: str) -> Dict[str, Any] | None:
+    def _damp_downmove(self, channel_key, order_index: dict, candidate: str):
+        """Defer a move to a lower-preference player, or return None.
+
+        Returns the candidate when the switch is deferred (isolated failure of
+        the last-served source); returns None when the result should be served
+        immediately (same source, move up in preference, already-failed-over,
+        or no history). Recording of the served candidate happens here for
+        immediate serves; deferred serves are recorded by extract() only if
+        the switch is actually accepted.
+        """
+        if channel_key is None:
+            return None
+        last = self._last_served_candidate.get(channel_key)
+        new_idx = order_index.get(candidate, len(order_index))
+        last_idx = order_index.get(last, -1) if last else -1
+        if last is None or new_idx <= last_idx:
+            self._last_served_candidate[channel_key] = candidate
+            self._downmove_strikes.pop(channel_key, None)
+            return None
+        if self._downmove_strikes.get(channel_key, 0) < self.SOURCE_DAMP_STRIKES:
+            logger.warning(
+                "DLStreams: holding last-served source %s, deferring %s (isolated validation failure)",
+                last,
+                candidate,
+            )
+            return candidate
+        self._last_served_candidate[channel_key] = candidate
+        self._downmove_strikes.pop(channel_key, None)
+        return None
+
+    async def _extract_directly(self, url: str, channel_id: str, channel_key=None) -> Dict[str, Any] | None:
         """Fast path direct HTTP M3U8 extraction."""
         session = await self._get_session(url)
         seen_iframes: set[str] = set()
@@ -621,6 +661,7 @@ class DLStreamsExtractor(BaseExtractor):
         player_urls = self._prioritize_player_urls(
             channel_id, requested_url=url, watch_html=watch_html
         )
+        order_index = {u: i for i, u in enumerate(player_urls)}
 
         for candidate_index, candidate in enumerate(player_urls):
             if _remaining() <= 2.0:
@@ -774,6 +815,9 @@ class DLStreamsExtractor(BaseExtractor):
                     logger.info("DLStreams: working stream found via %s", candidate)
                     result = self._build_result(stream_url, playback_headers)
                     result["_validated"] = True
+                    damped = self._damp_downmove(channel_key, order_index, candidate)
+                    if damped:
+                        result["_damped"] = damped
                     return result
                 logger.info("DLStreams: stream from %s is dead, trying next player", candidate)
                 continue
@@ -855,7 +899,7 @@ class DLStreamsExtractor(BaseExtractor):
                 logger.debug("DLStreams: waiting for in-flight extraction of %s", channel_key)
                 result = await existing_task
             else:
-                task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, **kwargs))
+                task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, channel_key=channel_key, **kwargs))
                 self._inflight_extract_tasks[channel_key] = task
                 try:
                     result = await task
@@ -879,6 +923,24 @@ class DLStreamsExtractor(BaseExtractor):
             raise
 
         if result and result.pop("_validated", False):
+            damped_candidate = result.pop("_damped", None)
+            if damped_candidate and cached and cached[1] > time.monotonic():
+                if await self._is_cached_still_alive(cached[2]):
+                    logger.warning(
+                        "DLStreams: deferring source switch for %s, serving last known stream URL",
+                        channel_key,
+                    )
+                    self._downmove_strikes[channel_key] = self._downmove_strikes.get(channel_key, 0) + 1
+                    self._backoff_cache_entry(channel_key, cached)
+                    return dict(cached[2])
+                logger.warning(
+                    "DLStreams: last known stream for %s is dead, accepting switch to %s",
+                    channel_key,
+                    damped_candidate,
+                )
+            if damped_candidate:
+                self._last_served_candidate[channel_key] = damped_candidate
+                self._downmove_strikes.pop(channel_key, None)
             now = time.monotonic()
             self._stream_cache[channel_key] = (
                 now + self.STREAM_CACHE_SECONDS,
@@ -899,6 +961,7 @@ class DLStreamsExtractor(BaseExtractor):
             )
         elif result:
             result.pop("_validated", None)
+            result.pop("_damped", None)
         return result
 
     def _backoff_cache_entry(self, channel_key, cached: tuple[float, float, dict]) -> None:
@@ -922,7 +985,7 @@ class DLStreamsExtractor(BaseExtractor):
         except Exception:
             return False
 
-    async def _extract_impl(self, url: str, channel_id: str, **kwargs) -> Dict[str, Any]:
+    async def _extract_impl(self, url: str, channel_id: str, channel_key=None, **kwargs) -> Dict[str, Any]:
         try:
             session = await self._get_session(url)
 
@@ -930,7 +993,7 @@ class DLStreamsExtractor(BaseExtractor):
             direct_error = None
             try:
                 logger.info("DLStreams: Attempting direct browser-less HTTP extraction for %s", f"premium{channel_id}")
-                direct_result = await self._extract_directly(url, channel_id)
+                direct_result = await self._extract_directly(url, channel_id, channel_key)
                 if direct_result:
                     logger.info("DLStreams: Direct browser-less extraction succeeded for %s!", f"premium{channel_id}")
                     return direct_result
