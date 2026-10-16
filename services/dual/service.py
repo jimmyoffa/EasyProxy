@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 from aiohttp import web
 
 from .audio import AudioStore
+from .http_client import AssetFetchError
 from .offsets import RemoteOffsetStore
 from .routing import as_payload, from_values
 from .security import SessionManager, request_token, resolves_publicly
@@ -292,6 +293,11 @@ async def audio_init(request: web.Request) -> web.Response:
             "code": "AUDIO_NETWORK_TIMEOUT",
             "message": "audio upstream request timed out",
         }) from exc
+    except AssetFetchError as exc:
+        raise DualServiceError(exc.status, {
+            "code": "AUDIO_NETWORK_ERROR",
+            "message": str(exc),
+        }) from exc
     except (ValueError, RuntimeError) as exc:
         raise DualServiceError(404, str(exc)) from exc
 
@@ -313,6 +319,11 @@ async def audio_segment(request: web.Request) -> web.Response:
         raise DualServiceError(504, {
             "code": "AUDIO_NETWORK_TIMEOUT",
             "message": "audio upstream request timed out",
+        }) from exc
+    except AssetFetchError as exc:
+        raise DualServiceError(exc.status, {
+            "code": "AUDIO_NETWORK_ERROR",
+            "message": str(exc),
         }) from exc
     except (ValueError, RuntimeError) as exc:
         raise DualServiceError(404, str(exc)) from exc
@@ -401,6 +412,11 @@ async def subtitle_init(request: web.Request) -> web.Response:
             "code": "SUBTITLE_NETWORK_TIMEOUT",
             "message": "subtitle upstream request timed out",
         }) from exc
+    except AssetFetchError as exc:
+        raise DualServiceError(exc.status, {
+            "code": "SUBTITLE_NETWORK_ERROR",
+            "message": str(exc),
+        }) from exc
     except (ValueError, RuntimeError) as exc:
         raise DualServiceError(404, str(exc)) from exc
 
@@ -422,6 +438,11 @@ async def subtitle_segment(request: web.Request) -> web.Response:
         raise DualServiceError(504, {
             "code": "SUBTITLE_NETWORK_TIMEOUT",
             "message": "subtitle upstream request timed out",
+        }) from exc
+    except AssetFetchError as exc:
+        raise DualServiceError(exc.status, {
+            "code": "SUBTITLE_NETWORK_ERROR",
+            "message": str(exc),
         }) from exc
     except (ValueError, RuntimeError) as exc:
         raise DualServiceError(404, str(exc)) from exc

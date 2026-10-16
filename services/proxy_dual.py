@@ -388,8 +388,10 @@ class HLSProxyDualMixin:
                 return await response.text(), final_url
         except DualLinksError:
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise DualLinksError(502, f"source fetch failed: {type(exc).__name__}") from exc
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            # OSError also covers python_socks failures (dead WARP/Tor SOCKS).
+            logger.warning("[DUAL] source fetch failed: %s (%s)", url, exc)
+            raise DualLinksError(502, f"source fetch failed: {type(exc).__name__}: {exc}") from exc
         finally:
             BYPASS_WARP_CONTEXT.reset(bypass_token)
             BYPASS_PROXIES_CONTEXT.reset(proxy_bypass_token)
