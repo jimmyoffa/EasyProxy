@@ -137,6 +137,8 @@ class SyncEngine:
         host = (urlparse(url).hostname or "").lower()
         gate = self._host_gates.get(host)
         if gate is None:
+            if len(self._host_gates) >= 256:
+                self._host_gates.pop(next(iter(self._host_gates)), None)
             gate = _AdaptiveHostGate(host)
             self._host_gates[host] = gate
         return gate
@@ -481,7 +483,16 @@ class SyncEngine:
                 "-of", "default=nw=1:nk=1", str(sample),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            output, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+            try:
+                output, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+            except BaseException:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                await process.wait()
+                raise
             values = output.decode(errors="replace").strip().splitlines()
             return float(values[0]) if values else 0.0
         finally:

@@ -789,19 +789,10 @@ class ManifestRewriter:
                     encoded_key_url = urllib.parse.quote(absolute_key_url, safe="")
                     
                     # Proxy KEY URL (come per #EXT-X-KEY)
-                    proxy_key_url = (
-                        f"{proxy_base}/key?key_url={encoded_key_url}"
-                        f"&h_Referer={urllib.parse.quote(base_url, safe='')}"
-                    )
+                    proxy_key_url = f"{proxy_base}/key?key_url={encoded_key_url}"
+                    if "&h_referer=" not in header_params.lower():
+                        proxy_key_url += f"&h_Referer={urllib.parse.quote(base_url, safe='')}"
                     proxy_key_url += header_params
-                    if api_password:
-                        proxy_key_url += f"&api_password={api_password}"
-                    if bypass_warp:
-                        proxy_key_url += "&warp=off"
-                    if bypass_proxies:
-                        proxy_key_url += "&proxy=off"
-                    if disable_ssl:
-                        proxy_key_url += "&disable_ssl=1"
 
                     new_line = line[:uri_start] + proxy_key_url + line[uri_end:]
                     rewritten_lines.append(new_line)

@@ -9,14 +9,10 @@ from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession
 from config import get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor
+from extractors.base import BaseExtractor, ExtractorError
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
-
-
-class ExtractorError(Exception):
-    pass
 
 
 _DOOD_UA = (

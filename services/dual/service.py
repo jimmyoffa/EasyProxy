@@ -23,6 +23,7 @@ from .routing import as_payload, from_values
 from .security import SessionManager, request_token, resolves_publicly
 from .subtitles import SubtitleStore
 from .sync import SyncEngine
+import config as _config_mod
 from config import check_password
 
 
@@ -30,6 +31,16 @@ logger = logging.getLogger("easyproxy.dual")
 SESSION_TTL = 21600
 BACKGROUND_CLEANUP_INTERVAL = 5
 API_PASSWORD = os.environ.get("API_PASSWORD", "").strip()
+
+
+def _effective_api_password(request: web.Request) -> str:
+    return (
+        request.query.get("api_password")
+        or getattr(_config_mod, "API_PASSWORD", None)
+        or os.environ.get("API_PASSWORD", "").strip()
+        or API_PASSWORD
+    )
+
 
 sessions = SessionManager(SESSION_TTL)
 audio = None
@@ -104,7 +115,7 @@ def _audio_url(request: web.Request, hid: str, token: str, offset: float = 0.0, 
         "r": int(round(rate * 1_000_000_000)),
         "t": token,
     }
-    api_password = request.query.get("api_password") or API_PASSWORD
+    api_password = _effective_api_password(request)
     if api_password:
         values["api_password"] = api_password
     query = urlencode(values)
@@ -113,7 +124,7 @@ def _audio_url(request: web.Request, hid: str, token: str, offset: float = 0.0, 
 
 def _subtitle_url(request: web.Request, sid: str, token: str) -> str:
     values = {"t": token}
-    api_password = request.query.get("api_password") or API_PASSWORD
+    api_password = _effective_api_password(request)
     if api_password:
         values["api_password"] = api_password
     return f"{_base_url(request)}/dual/sub/{sid}/subtitles.m3u8?{urlencode(values)}"
@@ -121,7 +132,7 @@ def _subtitle_url(request: web.Request, sid: str, token: str) -> str:
 
 def _asset_query(request: web.Request, offset_ms: int, rate_nano: int, token: str) -> str:
     values = {"o": offset_ms, "r": rate_nano, "t": token}
-    api_password = request.query.get("api_password") or API_PASSWORD
+    api_password = _effective_api_password(request)
     if api_password:
         values["api_password"] = api_password
     return urlencode(values)

@@ -57,10 +57,16 @@ def _stamp(seconds: float) -> str:
 def shift_webvtt(text: str, offset: float, rate: float) -> str:
     """Map every cue to the audio timeline; cues fully before 0 are dropped."""
     output: list[str] = []
+    pending_id: str | None = None
     skipping = False
+    in_block = False
     for line in text.splitlines():
         if not line.strip():
+            if pending_id is not None:
+                output.append(pending_id)
+                pending_id = None
             skipping = False
+            in_block = False
             output.append(line)
             continue
         if skipping:
@@ -69,8 +75,13 @@ def shift_webvtt(text: str, offset: float, rate: float) -> str:
         if match:
             end = (_seconds(match.group(3)) + offset) / rate
             if end <= 0.0:
+                pending_id = None
                 skipping = True
                 continue
+            if pending_id is not None:
+                output.append(pending_id)
+                pending_id = None
+            in_block = True
             start = (_seconds(match.group(2)) + offset) / rate
             output.append(
                 f"{match.group(1)}{_stamp(start)} --> {_stamp(end)}{match.group(4)}"
@@ -82,7 +93,23 @@ def shift_webvtt(text: str, offset: float, rate: float) -> str:
                 f"{max(0, round((int(item.group(2)) + offset * MPEGTS_TIMESCALE) / rate))}",
                 line,
             )
-        output.append(line)
+            if pending_id is not None:
+                output.append(pending_id)
+                pending_id = None
+            output.append(line)
+            continue
+        if in_block or line.lstrip("\ufeff").startswith(("WEBVTT", "STYLE", "NOTE", "REGION")):
+            if pending_id is not None:
+                output.append(pending_id)
+                pending_id = None
+            in_block = True
+            output.append(line)
+            continue
+        if pending_id is not None:
+            output.append(pending_id)
+        pending_id = line
+    if pending_id is not None:
+        output.append(pending_id)
     return "\n".join(output) + "\n"
 
 
@@ -234,7 +261,12 @@ class SubtitleStore:
         if len(data) % 16:
             raise ValueError("encrypted subtitle asset is not block aligned")
         decryptor = Cipher(algorithms.AES(track["key"]), modes.CBC(iv)).decryptor()
-        return decryptor.update(data) + decryptor.finalize()
+        plain = decryptor.update(data) + decryptor.finalize()
+        if plain:
+            pad = plain[-1]
+            if 1 <= pad <= 16 and plain.endswith(bytes([pad]) * pad):
+                plain = plain[:-pad]
+        return plain
 
     @staticmethod
     def _timescale(init: bytes) -> int:

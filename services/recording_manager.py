@@ -242,9 +242,8 @@ class RecordingManager:
                 # Parse EXT-X-MEDIA for separate audio track
                 if line.startswith('#EXT-X-MEDIA:') and 'TYPE=AUDIO' in line:
                     uri_match = re.search(r'URI="([^"]+)"', line)
-                    if uri_match and audio_url is None:
-                        if 'DEFAULT=YES' in line or audio_url is None:
-                            audio_url = uri_match.group(1)
+                    if uri_match and (audio_url is None or 'DEFAULT=YES' in line):
+                        audio_url = uri_match.group(1)
 
                 # Parse EXT-X-STREAM-INF for video variant
                 elif line.startswith('#EXT-X-STREAM-INF:'):
@@ -380,29 +379,29 @@ class RecordingManager:
             logger.info(f"Recording already exists for URL: {url[:80]}...")
             return None
 
-        filename = self._generate_filename(recording_id, name)
-        recordings_dir = config_store.get("recordings_dir", self.recordings_dir)
-        file_path = os.path.join(recordings_dir, filename)
-        if not os.path.exists(recordings_dir):
-            os.makedirs(recordings_dir)
-
-        # Apply duration limits
-        max_duration = config_store.get("max_recording_duration", 28800)
-        if duration:
-            duration = min(duration, max_duration)
-        else:
-            duration = max_duration
-
-        # Prepare stream-specific configuration
-        config = await self._prepare_stream_config(url, clearkey, extractor, max_res)
-
-        # Build FFmpeg command
-        cmd = self._build_ffmpeg_command(config, file_path, duration)
-
-        logger.info(f"Starting recording {recording_id}: {name}")
-        logger.debug(f"FFmpeg command: {' '.join(cmd)}")
-
         try:
+            filename = self._generate_filename(recording_id, name)
+            recordings_dir = config_store.get("recordings_dir", self.recordings_dir)
+            file_path = os.path.join(recordings_dir, filename)
+            if not os.path.exists(recordings_dir):
+                os.makedirs(recordings_dir)
+
+            # Apply duration limits
+            max_duration = config_store.get("max_recording_duration", 28800)
+            if duration:
+                duration = min(duration, max_duration)
+            else:
+                duration = max_duration
+
+            # Prepare stream-specific configuration
+            config = await self._prepare_stream_config(url, clearkey, extractor, max_res)
+
+            # Build FFmpeg command
+            cmd = self._build_ffmpeg_command(config, file_path, duration)
+
+            logger.info(f"Starting recording {recording_id}: {name}")
+            logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -480,7 +479,7 @@ class RecordingManager:
                     os.kill(pid, signal.SIGTERM)
                     await asyncio.sleep(2)
                     if self.db.is_pid_running(pid):
-                        os.kill(pid, signal.SIGKILL)
+                        os.kill(pid, getattr(signal, 'SIGKILL', signal.SIGTERM))
                     logger.debug(f"Stopped recording {recording_id} via PID {pid}")
                 except ProcessLookupError:
                     logger.debug(f"Process {pid} already terminated")

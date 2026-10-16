@@ -502,9 +502,10 @@ class HLSProxyStreamingMixin:
             # ✅ Use pooled session with automatic retry failover
             bypass_warp = request.query.get("warp", "").lower() == "off"
             forced_proxy = request.query.get("proxy") or None
+            _seg_proxy_token = None
             if forced_proxy and forced_proxy.lower() == "off":
                 forced_proxy = None
-                _shared.BYPASS_PROXIES_CONTEXT.set(True)
+                _seg_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
                 logger.debug(f"🔍 [Segment-DEBUG] proxy=off detected, BYPASS_PROXIES_CONTEXT=True, bypass_warp={bypass_warp}")
             forced_proxy = _config.resolve_proxy_alias(forced_proxy)
             forced_proxy = self._discard_disabled_warp_route(
@@ -727,12 +728,17 @@ class HLSProxyStreamingMixin:
                         )
                     return response
             finally:
+                if _seg_proxy_token is not None:
+                    _shared.BYPASS_PROXIES_CONTEXT.reset(_seg_proxy_token)
+                    _seg_proxy_token = None
                 if resp_ctx:
                     await resp_ctx.__aexit__(None, None, None)
                 if session and session_proxy and not session.closed:
                     await session.close()
 
         except Exception as e:
+            if locals().get("_seg_proxy_token") is not None:
+                _shared.BYPASS_PROXIES_CONTEXT.reset(_seg_proxy_token)
             logger.error(
                 "Error in segment proxy: %s [%s]",
                 e,
@@ -759,15 +765,17 @@ class HLSProxyStreamingMixin:
         extractor_key = extractor_key or request.query.get("extractor_key", "")
         stream_key = stream_key or request.query.get("stream_key")
         admin_warp_off, admin_proxy_off = get_extractor_routing_overrides(extractor_key)
+        _ps_warp_token = None
+        _ps_proxy_token = None
         if admin_warp_off:
             bypass_warp = True
-            _shared.BYPASS_WARP_CONTEXT.set(True)
+            _ps_warp_token = _shared.BYPASS_WARP_CONTEXT.set(True)
         if admin_proxy_off:
             bypass_proxies = True
-            _shared.BYPASS_PROXIES_CONTEXT.set(True)
+            _ps_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
 
-        if bypass_proxies:
-            _shared.BYPASS_PROXIES_CONTEXT.set(True)
+        if bypass_proxies and _ps_proxy_token is None:
+            _ps_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
         if force_direct is None:
             force_direct = self._should_force_direct_from_query(request)
         else:
@@ -1912,6 +1920,10 @@ class HLSProxyStreamingMixin:
             )
             return web.Response(text=f"Stream error: {err_msg}", status=500)
         finally:
+            if _ps_warp_token is not None:
+                _shared.BYPASS_WARP_CONTEXT.reset(_ps_warp_token)
+            if _ps_proxy_token is not None:
+                _shared.BYPASS_PROXIES_CONTEXT.reset(_ps_proxy_token)
             if session and not session.closed and session_proxy is not None:
                 await session.close()
             if coalesce_future is not None:
@@ -2111,7 +2123,8 @@ class HLSProxyStreamingMixin:
                     )
                     return None
                 body = await fr_resp.read()
-                is_image = fr_resp.headers.get("content-type", "").startswith("image/") or body[:8] == b"\x89PNG\r\n\x1a\n"
+                fr_headers = getattr(fr_resp, "headers", None) or {}
+                is_image = fr_headers.get("content-type", "").startswith("image/") or body[:8] == b"\x89PNG\r\n\x1a\n"
                 if is_image or request.path.endswith(".ts") or stream_url.endswith(".ts"):
                     body = await asyncio.to_thread(self._strip_fake_png_header_from_ts, body)
                 rh = {
@@ -2216,9 +2229,10 @@ class HLSProxyStreamingMixin:
             # Get proxy-enabled session for segment fetches
             bypass_warp = request.query.get("warp", "").lower() == "off"
             forced_proxy = request.query.get("proxy") or None
+            _dec_proxy_token = None
             if forced_proxy and forced_proxy.lower() == "off":
                 forced_proxy = None
-                _shared.BYPASS_PROXIES_CONTEXT.set(True)
+                _dec_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
             forced_proxy = _config.resolve_proxy_alias(forced_proxy)
             forced_proxy = self._discard_disabled_warp_route(
                 forced_proxy, bypass_warp
@@ -2441,7 +2455,8 @@ class HLSProxyStreamingMixin:
                         url or init_url,
                         session_key=stream_session_key,
                     )
-                    _shared.BYPASS_PROXIES_CONTEXT.set(True)
+                    if _dec_proxy_token is None:
+                        _dec_proxy_token = _shared.BYPASS_PROXIES_CONTEXT.set(True)
                     retry_session, retry_proxy = await self._get_proxy_session(
                         url or init_url,
                         bypass_warp=True,
@@ -2486,6 +2501,9 @@ class HLSProxyStreamingMixin:
                             ),
                         )
             finally:
+                if _dec_proxy_token is not None:
+                    _shared.BYPASS_PROXIES_CONTEXT.reset(_dec_proxy_token)
+                    _dec_proxy_token = None
                 if segment_session and not segment_session.closed:
                     await segment_session.close()
 
@@ -2586,13 +2604,15 @@ class HLSProxyStreamingMixin:
             )
 
         except Exception as e:
+            if locals().get("_dec_proxy_token") is not None:
+                _shared.BYPASS_PROXIES_CONTEXT.reset(_dec_proxy_token)
             logger.error(
                 "❌ Decryption error: %s [%s]",
                 e,
                 request_log_context(
                     request,
                     url or init_url,
-                    route=safe_log_route(segment_proxy or forced_proxy),
+                    route=safe_log_route(locals().get("segment_proxy") or locals().get("forced_proxy")),
                 ),
             )
             return web.Response(status=500, text=f"Decryption failed: {str(e)}")

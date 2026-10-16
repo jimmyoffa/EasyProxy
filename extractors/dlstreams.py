@@ -25,7 +25,7 @@ from config import (
     get_ordered_proxies_for_url,
 )
 import config as _cfg
-from extractors.base import BaseExtractor
+from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +72,6 @@ def _decode_barecrop_econfig(enc: str) -> str | None:
         return None
     except Exception:
         return None
-
-class ExtractorError(Exception):
-    pass
 
 class DLStreamsExtractor(BaseExtractor):
     """Extractor for daddy live / dlstreams streams."""

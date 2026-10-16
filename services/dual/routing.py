@@ -37,7 +37,7 @@ def _refresh_live_config() -> None:
 def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "off"}
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)

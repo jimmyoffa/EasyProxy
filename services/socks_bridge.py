@@ -68,12 +68,14 @@ def _create_client_handler(upstream_socks_url: str):
                     break
                 headers.append(h)
 
+            up_writer = None
             if method == "CONNECT":
                 if ":" in target:
-                    host, port_str = target.split(":", 1)
+                    host, _, port_str = target.rpartition(":")
+                    host = host.strip("[]")
                     port = int(port_str)
                 else:
-                    host, port = target, 443
+                    host, port = target.strip("[]"), 443
 
                 proxy = Proxy.from_url(upstream_socks_url)
                 upstream_sock = await proxy.connect(dest_host=host, dest_port=port)
@@ -118,6 +120,11 @@ def _create_client_handler(upstream_socks_url: str):
             except Exception:
                 pass
         finally:
+            if up_writer is not None:
+                try:
+                    up_writer.close()
+                except Exception:
+                    pass
             try:
                 client_writer.close()
             except Exception:

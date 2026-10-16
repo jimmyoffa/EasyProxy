@@ -60,6 +60,11 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
             return _unauthorized()
         try:
             payload = await request.json()
+        except Exception:
+            return _json({"error": "Invalid JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return _json({"error": "Invalid JSON payload"}, status=400)
+        try:
             tor_proxy.set_bind(str(payload.get("bind", "")))
             if tor_proxy.is_enabled():
                 await tor_proxy.restart()
@@ -72,6 +77,11 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
             return _unauthorized()
         try:
             payload = await request.json()
+        except Exception:
+            return _json({"error": "Invalid JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return _json({"error": "Invalid JSON payload"}, status=400)
+        try:
             value = str(payload.get("exit_nodes", ""))
             if tor_proxy.is_enabled():
                 await tor_proxy.apply_exit_nodes(value)

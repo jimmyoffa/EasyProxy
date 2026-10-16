@@ -24,7 +24,7 @@ class LiveTVExtractor(BaseExtractor):
         self._apply_routing_kwargs(url, kwargs)
         try:
             if "livetv.sx" in url.lower() or "webplayer" in url.lower() or "emb.apl" in url.lower():
-                return await self._extract_livetvsx(url, stream_title)
+                return await self._extract_livetvsx(url, stream_title, **kwargs)
 
             resp = await self._make_request(url, ssl=False)
             response_text = resp.text
@@ -35,7 +35,7 @@ class LiveTVExtractor(BaseExtractor):
             player_api_base, method = await self._extract_player_api_base(response_text)
             if not player_api_base:
                 # Fallback to livetv.sx logic if player_api is missing
-                return await self._extract_livetvsx(url, stream_title)
+                return await self._extract_livetvsx(url, stream_title, **kwargs)
 
 
             # Get player options
@@ -86,7 +86,7 @@ class LiveTVExtractor(BaseExtractor):
         except Exception as e:
             raise ExtractorError(f"Extraction failed: {str(e)}")
 
-    async def _extract_livetvsx(self, url: str, stream_title: str = None) -> dict:
+    async def _extract_livetvsx(self, url: str, stream_title: str = None, **kwargs) -> dict:
         """Extract stream from livetv.sx (event page or webplayer URL)."""
         # Event page resolution
         if "/eventinfo/" in url:
@@ -133,8 +133,15 @@ class LiveTVExtractor(BaseExtractor):
             if dlive_url.startswith("//"):
                 dlive_url = "https:" + dlive_url
             from extractors.dlstreams import DLStreamsExtractor
-            dl_extractor = DLStreamsExtractor(self.request_headers, proxies=self.proxies)
-            return await dl_extractor.extract(dlive_url)
+            dl_extractor = DLStreamsExtractor(
+                self.request_headers,
+                proxies=self.proxies,
+                bypass_warp=bool(self.bypass_warp_active),
+            )
+            try:
+                return await dl_extractor.extract(dlive_url, **kwargs)
+            finally:
+                await dl_extractor.close()
 
         # 2. Check for alieztv / emb.*
         emb_match = re.search(r'<iframe[^>]+src=["\']((?:https?:)?//emb\.[^"\']+)["\']', wp_html, re.I)

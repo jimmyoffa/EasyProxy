@@ -70,7 +70,7 @@ class CinejoyExtractor(BaseExtractor):
         # If season/episode passed as kwargs, merge with URL query
         qs = parse_qs(parsed.query)
         s = kwargs.get("season") or kwargs.get("s") or (qs.get("season", [None])[0]) or (qs.get("s", [None])[0])
-        e = kwargs.get("episode") or kwargs.get("episode", [None])[0] or (qs.get("episode", [None])[0]) or (qs.get("e", [None])[0])
+        e = kwargs.get("episode") or kwargs.get("e") or (qs.get("episode", [None])[0]) or (qs.get("e", [None])[0])
 
         path = parsed.path.rstrip("/")
         if s and e and not re.search(r"/\d+/\d+/?$", path):
@@ -91,8 +91,9 @@ class CinejoyExtractor(BaseExtractor):
             raise ExtractorError(f"Cinejoy: runner script not found at {_RUNNER}")
 
         raw_proxy = kwargs.get("proxy")
+        raw_proxy_norm = str(raw_proxy or "").strip().lower()
         bypass_proxies = (
-            str(raw_proxy or "").lower() in {"off", "none", "no"}
+            raw_proxy_norm in {"off", "false", "0", "direct", "none", "no"}
             or _cfg.BYPASS_PROXIES_CONTEXT.get()
         )
         bypass_warp = bool(
@@ -105,9 +106,14 @@ class CinejoyExtractor(BaseExtractor):
 
         direct_requested = (
             str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"}
+            or raw_proxy_norm == "direct"
             or (bypass_proxies and bypass_warp)
         )
-        forced_proxy = None if bypass_proxies else (raw_proxy or None)
+        forced_proxy = (
+            None
+            if (bypass_proxies or raw_proxy_norm in {"off", "false", "0", "direct", "none", "no", "on", "auto", "true", ""})
+            else str(raw_proxy).strip()
+        )
         forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
 
         if direct_requested and (bypass_proxies or not forced_proxy):
@@ -115,9 +121,14 @@ class CinejoyExtractor(BaseExtractor):
         elif forced_proxy:
             proxy = str(forced_proxy)
         else:
-            proxy = await _cfg.get_preferred_proxy_for_url(
-                url, self.extractor_name, self.proxies, bypass_warp=bypass_warp
-            )
+            token = _cfg.BYPASS_PROXIES_CONTEXT.set(True) if bypass_proxies else None
+            try:
+                proxy = await _cfg.get_preferred_proxy_for_url(
+                    url, self.extractor_name, [] if bypass_proxies else self.proxies, bypass_warp=bypass_warp
+                )
+            finally:
+                if token is not None:
+                    _cfg.BYPASS_PROXIES_CONTEXT.reset(token)
 
         if proxy and bypass_warp and _cfg.is_warp_proxy_url(proxy):
             proxy = None

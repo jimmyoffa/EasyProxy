@@ -16,6 +16,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from config_store import DEFAULT_RECORDINGS_DIR
 from config import WARP_PROXY_URL, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, STRICT_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback, mark_proxy_dead, DEAD_PROXIES, _proxy_lock, ALL_PROXY_ERRORS
 import config as _cfg
+from extractors.base import ExtractorError
 from services.flaresolverr import FlareSolverrSolution, shutdown_flare_solver, solve_cloudflare
 
 logger = logging.getLogger(__name__)
@@ -33,10 +34,6 @@ try:
 except (TypeError, ValueError):
     _VIXSRC_COOKIE_TTL = 7200
 _VIXSRC_COOKIE_LOCK = threading.RLock()
-
-
-class ExtractorError(Exception):
-    """Eccezione personalizzata per errori di estrazione."""
 
 
 class CloudflareChallengeError(ExtractorError):
@@ -118,8 +115,13 @@ class VixSrcExtractor:
         return url.replace("vixcloud.co", _vixsrc_domain).replace("vixsrc.to", _vixsrc_domain)
     @staticmethod
     def _normalize_proxy_url(proxy_value: str) -> str:
-        proxy_value = unquote(proxy_value)
-        proxy_value = proxy_value.strip()
+        if not proxy_value:
+            return ""
+        proxy_value = unquote(str(proxy_value)).strip()
+        if not proxy_value or proxy_value.lower() in (
+            "off", "false", "0", "direct", "none", "no", "on", "auto", "true"
+        ):
+            return ""
         # Preserve explicit SOCKS5 routes. Scheme-less third-party proxies
         # retain the existing socks5h default.
         if proxy_value.startswith("socks5://"):
@@ -1037,11 +1039,34 @@ class VixSrcExtractor:
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Estrae URL VixSrc."""
         source_url = url
+        prev_bypass_warp = self.bypass_warp_active
+        raw_proxy = kwargs.get("proxy")
+        raw_proxy_norm = str(raw_proxy or "").strip().lower()
+        bypass_proxies = (
+            raw_proxy_norm in {"off", "false", "0", "direct", "none", "no"}
+            or _cfg.BYPASS_PROXIES_CONTEXT.get()
+        )
+        bypass_warp = bool(
+            kwargs.get("bypass_warp")
+            or str(kwargs.get("warp", "")).strip().lower() in {"off", "false", "0", "no"}
+            or _cfg.BYPASS_WARP_CONTEXT.get()
+            or self.bypass_warp_active
+        )
+        direct_requested = (
+            str(kwargs.get("direct", "")).strip().lower() in {"1", "true", "yes", "on"}
+            or bool(kwargs.get("force_direct"))
+            or raw_proxy_norm == "direct"
+            or (bypass_proxies and bypass_warp)
+        )
+        if direct_requested:
+            bypass_proxies = True
+            bypass_warp = True
+        self.bypass_warp_active = bypass_warp
+        proxy_ctx_token = _cfg.BYPASS_PROXIES_CONTEXT.set(True) if bypass_proxies else None
+        warp_ctx_token = _cfg.BYPASS_WARP_CONTEXT.set(True) if bypass_warp else None
         try:
             await self._refresh_vixsrc_domain()
-            forced_proxy = kwargs.get("proxy")
-            if forced_proxy:
-                forced_proxy = self._normalize_proxy_url(forced_proxy)
+            forced_proxy = None if bypass_proxies else (self._normalize_proxy_url(raw_proxy) or None)
             # ponytail: proxy_exclude_domains drops even explicit ?proxy= (WARP exempt)
             forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
             parsed_url = urlparse(url)
@@ -1056,11 +1081,15 @@ class VixSrcExtractor:
 
             if "/playlist/" in parsed_url.path:
                 logger.info("URL is already a VixSrc manifest, no extraction required.")
-                selected_proxy = forced_proxy or parse_qs(parsed_url.query).get("proxy", [None])[0]
-                if not selected_proxy:
-                    selected_proxy = self.last_used_proxy or await self._preferred_proxy(url)
-                if selected_proxy:
-                    selected_proxy = self._normalize_proxy_url(selected_proxy)
+                if direct_requested:
+                    selected_proxy = None
+                else:
+                    query_proxy = None if bypass_proxies else parse_qs(parsed_url.query).get("proxy", [None])[0]
+                    selected_proxy = forced_proxy or (self._normalize_proxy_url(query_proxy) if query_proxy else None)
+                    if not selected_proxy:
+                        selected_proxy = (None if bypass_proxies else self.last_used_proxy) or await self._preferred_proxy(url)
+                    if selected_proxy:
+                        selected_proxy = self._normalize_proxy_url(selected_proxy) or None
                 logger.debug(f"Extractor Debug: Extractor result selected_proxy: {selected_proxy}")
                 stream_headers = self._fresh_headers()
                 # Use cookies and UA from the request (e.g. cf_clearance forwarded by redirect)
@@ -1080,7 +1109,7 @@ class VixSrcExtractor:
                     "request_headers": stream_headers,
                     "mediaflow_endpoint": self.mediaflow_endpoint,
                     "selected_proxy": selected_proxy,
-                    "force_direct": bool(kwargs.get("force_direct")) or (selected_proxy is None and self.last_used_direct),
+                    "force_direct": bool(kwargs.get("force_direct")) or direct_requested or (selected_proxy is None and self.last_used_direct),
                     "bypass_warp": self.bypass_warp_active,
                 }
 
@@ -1288,14 +1317,20 @@ class VixSrcExtractor:
                 "destination_url": clean_destination,
                 "request_headers": stream_headers,
                 "mediaflow_endpoint": self.mediaflow_endpoint,
-                "selected_proxy": self.last_used_proxy,
-                "force_direct": self.last_used_proxy is None and self.last_used_direct,
+                "selected_proxy": None if direct_requested else self.last_used_proxy,
+                "force_direct": direct_requested or (self.last_used_proxy is None and self.last_used_direct),
                 "bypass_warp": self.bypass_warp_active,
             }
 
         except Exception as e:
             logger.error("VixSrc extraction failed: %s", str(e))
             raise ExtractorError(f"VixSrc extraction completely failed: {str(e)}")
+        finally:
+            self.bypass_warp_active = prev_bypass_warp
+            if proxy_ctx_token is not None:
+                _cfg.BYPASS_PROXIES_CONTEXT.reset(proxy_ctx_token)
+            if warp_ctx_token is not None:
+                _cfg.BYPASS_WARP_CONTEXT.reset(warp_ctx_token)
 
     async def close(self):
         """Chiude definitivamente la sessione."""

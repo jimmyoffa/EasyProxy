@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
 from config import BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor
+from extractors.base import BaseExtractor, ExtractorError
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,6 @@ _VYPN_VERSION = "1.4.1"
 _BASE_SITES = ["https://vavoo.to", "https://kool.to"]
 _LANGUAGE = "de"
 _REGION = "DE"
-
-
-class ExtractorError(Exception):
-    pass
 
 
 class VavooExtractor(BaseExtractor):

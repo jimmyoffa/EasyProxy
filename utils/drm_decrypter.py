@@ -218,25 +218,35 @@ class MP4Decrypter:
         parser = MP4Parser(data)
         atoms = parser.list_atoms()
 
-        atom_process_order = [b"moov", b"moof", b"sidx", b"mdat"]
+        processed_by_index = {}
+        for idx, atom in enumerate(atoms):
+            if atom.atom_type == b"moov":
+                processed_by_index[idx] = self._process_moov(atom)
 
-        processed_atoms = {}
-        for atom_type in atom_process_order:
-            if atom := next((a for a in atoms if a.atom_type == atom_type), None):
-                processed_atoms[atom_type] = self._process_atom(atom_type, atom)
+        pending_sidx = []
+        for idx, atom in enumerate(atoms):
+            if atom.atom_type == b"sidx":
+                pending_sidx.append((idx, atom))
+            elif atom.atom_type == b"moof":
+                processed_by_index[idx] = self._process_moof(atom)
+                for sidx_idx, sidx_atom in pending_sidx:
+                    processed_by_index[sidx_idx] = self._process_sidx(sidx_atom)
+                pending_sidx.clear()
+            elif atom.atom_type == b"mdat":
+                processed_by_index[idx] = self._decrypt_mdat(atom)
+
+        for sidx_idx, sidx_atom in pending_sidx:
+            processed_by_index[sidx_idx] = self._process_sidx(sidx_atom)
 
         result = bytearray()
         current_offset = 0
-        for atom in atoms:
+        for idx, atom in enumerate(atoms):
             is_init_atom = current_offset < init_length
             current_offset += atom.size
             if init_length > 0 and is_init_atom:
                 continue
-            if atom.atom_type in processed_atoms:
-                processed_atom = processed_atoms[atom.atom_type]
-                result.extend(processed_atom.pack())
-            else:
-                result.extend(atom.pack())
+            processed_atom = processed_by_index.get(idx, atom)
+            result.extend(processed_atom.pack())
 
         return bytes(result)
 
@@ -597,15 +607,30 @@ class MP4Decrypter:
             MP4Atom: Processed 'sidx' atom with updated segment references.
         """
         sidx_data = bytearray(sidx.data)
+        if len(sidx_data) < 28:
+            return MP4Atom(b"sidx", len(sidx_data) + 8, sidx_data)
 
-        current_size = struct.unpack_from(">I", sidx_data, 32)[0]
+        has_box_header = sidx_data[4:8] == b"sidx"
+        version = sidx_data[8 if has_box_header else 0]
+        ref_offset = (32 if version == 0 else 40) if has_box_header else (24 if version == 0 else 32)
+        if (
+            ref_offset == 24
+            and len(sidx_data) >= 36
+            and struct.unpack_from(">I", sidx_data, 24)[0] == 0
+            and struct.unpack_from(">I", sidx_data, 32)[0] != 0
+        ):
+            ref_offset = 32
+        if len(sidx_data) < ref_offset + 4:
+            return MP4Atom(b"sidx", len(sidx_data) + 8, sidx_data)
+
+        current_size = struct.unpack_from(">I", sidx_data, ref_offset)[0]
         reference_type = current_size >> 31
         current_referenced_size = current_size & 0x7FFFFFFF
 
         # Remove encryption overhead from referenced size
-        new_referenced_size = current_referenced_size - self.encryption_overhead
+        new_referenced_size = max(0, current_referenced_size - self.encryption_overhead)
         new_size = (reference_type << 31) | new_referenced_size
-        struct.pack_into(">I", sidx_data, 32, new_size)
+        struct.pack_into(">I", sidx_data, ref_offset, new_size)
 
         return MP4Atom(b"sidx", len(sidx_data) + 8, sidx_data)
 
