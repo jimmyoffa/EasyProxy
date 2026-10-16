@@ -136,6 +136,7 @@ class HLSProxyPagesMixin:
         template_path = os.path.join(self._template_cache_dir, filename)
         with open(template_path, "r", encoding="utf-8") as f:
             content = f.read()
+        content = content.replace("{{APP_VERSION}}", APP_VERSION)
         self._template_cache[filename] = content
         return content
 

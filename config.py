@@ -46,7 +46,7 @@ _SOCKET_CHECK_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-APP_VERSION = "2.13.45"
+APP_VERSION = "2.13.46"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -705,9 +705,17 @@ def mark_proxy_dead(proxy_url: str, dead_duration: int = 300):
     if not proxy_url:
         return
 
-    _WARP_PROXY_URL = WARP_PROXY_URL
-    if _WARP_PROXY_URL and is_warp_proxy_url(proxy_url):
-        logging.warning("WARP proxy %s failure observed; keeping it managed by socket health checks.", proxy_url)
+    # WARP, Tor and the WireGuard tunnels (nordvpn/custom) are local, managed
+    # endpoints: a failed request (timeout, circuit churn, extractor error) says
+    # nothing about the SOCKS listener. Health is decided by the socket check
+    # only, so never park them in the dead cache.
+    if is_managed_tunnel_proxy_url(proxy_url):
+        if WARP_PROXY_URL and is_warp_proxy_url(proxy_url):
+            logging.warning("WARP proxy %s failure observed; keeping it managed by socket health checks.", proxy_url)
+        else:
+            logging.info("Local tunnel proxy %s failure observed; keeping it managed by socket health checks.", proxy_url)
+        with _proxy_lock:
+            DEAD_PROXIES.pop(proxy_url, None)
         return
 
     # If this is the only custom proxy configured in the system, do not mark it dead.
@@ -918,6 +926,47 @@ def is_warp_proxy_url(proxy_url: str | None) -> bool:
         return value
 
     return canonical(proxy_url) == canonical(WARP_PROXY_URL)
+
+
+def _proxy_matches_bind(proxy_url: str, bind: str) -> bool:
+    """True when a proxy URL points at a host:port bind (loopback aliases included)."""
+    if not bind:
+        return False
+    host, _, bind_port = bind.rpartition(":")
+    if not host or not bind_port.isdigit():
+        return False
+    try:
+        parsed = urllib.parse.urlparse(str(proxy_url).strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    if not parsed.hostname or not port:
+        return False
+    loopback = {"127.0.0.1", "localhost", "::1"}
+    bind_host = host.strip("[]").lower()
+    proxy_host = parsed.hostname.strip("[]").lower()
+    if bind_host != proxy_host and not (bind_host in loopback and proxy_host in loopback):
+        return False
+    return port == int(bind_port)
+
+
+def is_managed_tunnel_proxy_url(proxy_url: str | None) -> bool:
+    """Return True for a locally managed tunnel endpoint: WARP, Tor or a WireGuard slot."""
+    if not proxy_url:
+        return False
+    if WARP_PROXY_URL and is_warp_proxy_url(proxy_url):
+        return True
+    raw = str(proxy_url).strip()
+    try:
+        if not urllib.parse.urlparse(raw).hostname:
+            raw = "socks://" + raw
+        from services import tor_proxy, wg_tunnels
+
+        if wg_tunnels.slot_for_proxy_url(raw):
+            return True
+        return _proxy_matches_bind(raw, str(tor_proxy.get_bind() or ""))
+    except Exception:
+        return False
 
 
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:

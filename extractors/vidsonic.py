@@ -47,6 +47,8 @@ _DECODE_FN_RE = re.compile(
 class VidSonicExtractor(BaseExtractor):
     """VidSonic embed -> HLS extractor."""
 
+    REQUEST_TIMEOUT_TOTAL = 10
+
     def __init__(self, request_headers: dict, proxies: list = None):
         super().__init__(request_headers, proxies, extractor_name="vidsonic")
         self.mediaflow_endpoint = "hls_proxy"
