@@ -20,6 +20,7 @@ from .audio import AudioStore
 from .offsets import RemoteOffsetStore
 from .routing import as_payload, from_values
 from .security import SessionManager, request_token, resolves_publicly
+from .subtitles import SubtitleStore
 from .sync import SyncEngine
 from config import check_password
 
@@ -33,15 +34,17 @@ sessions = SessionManager(SESSION_TTL)
 audio = None
 offsets = None
 sync_engine = None
+subtitles = None
 
 
 def configure_cache(cache_dir: str | Path) -> None:
-    global audio, offsets, sync_engine
+    global audio, offsets, sync_engine, subtitles
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     audio = AudioStore(str(cache_path / "audio"))
     offsets = RemoteOffsetStore()
     sync_engine = SyncEngine(audio, offsets)
+    subtitles = SubtitleStore()
 
 
 class DualServiceError(Exception):
@@ -107,7 +110,15 @@ def _audio_url(request: web.Request, hid: str, token: str, offset: float = 0.0, 
     return f"{_base_url(request)}/dual/aud/{hid}/audio.m3u8?{query}"
 
 
-def _audio_query(request: web.Request, offset_ms: int, rate_nano: int, token: str) -> str:
+def _subtitle_url(request: web.Request, sid: str, token: str) -> str:
+    values = {"t": token}
+    api_password = request.query.get("api_password") or API_PASSWORD
+    if api_password:
+        values["api_password"] = api_password
+    return f"{_base_url(request)}/dual/sub/{sid}/subtitles.m3u8?{urlencode(values)}"
+
+
+def _asset_query(request: web.Request, offset_ms: int, rate_nano: int, token: str) -> str:
     values = {"o": offset_ms, "r": rate_nano, "t": token}
     api_password = request.query.get("api_password") or API_PASSWORD
     if api_password:
@@ -242,10 +253,10 @@ async def audio_playlist(request: web.Request) -> web.Response:
             "#EXT-X-PLAYLIST-TYPE:VOD",
             f"#EXT-X-TARGETDURATION:{int(max(item['duration'] for item in timeline)) + 1}",
             "#EXT-X-MEDIA-SEQUENCE:0",
-            f'#EXT-X-MAP:URI="{base}/dual/aud/{hid}/init.mp4?{_audio_query(request, offset_ms, rate_nano, token)}"',
+            f'#EXT-X-MAP:URI="{base}/dual/aud/{hid}/init.mp4?{_asset_query(request, offset_ms, rate_nano, token)}"',
         ]
         for item in timeline:
-            query = _audio_query(request, offset_ms, rate_nano, token)
+            query = _asset_query(request, offset_ms, rate_nano, token)
             lines += [
                 f"#EXTINF:{item['duration']:.6f},",
                 f"{base}/dual/aud/{hid}/s{item['idx']}.m4s?{query}",
@@ -307,6 +318,115 @@ async def audio_segment(request: web.Request) -> web.Response:
         raise DualServiceError(404, str(exc)) from exc
 
 
+async def prepare_subtitle_data(body: dict, request: web.Request) -> dict:
+    """Register one audio-source subtitle rendition for shifted playback."""
+    token = str(body.get("token") or "")
+    if not sessions.valid(token):
+        raise DualServiceError(401, "DUAL session required")
+    routing = from_values(request.query, body)
+    try:
+        sid = await subtitles.register(
+            playlist=str(body.get("playlist") or ""),
+            key_b64=str(body.get("key") or ""),
+            language=str(body.get("language") or ""),
+            name=str(body.get("name") or ""),
+            base_url=str(body.get("baseUrl") or ""),
+            headers=body.get("headers") if isinstance(body.get("headers"), dict) else {},
+            routing=routing,
+        )
+        metadata = subtitles.metadata(sid)
+        for url in (metadata["segs"][0], metadata["segs"][-1]):
+            if not await resolves_publicly(url):
+                raise ValueError("subtitle source does not resolve publicly")
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise DualServiceError(400, str(exc)) from exc
+    return {
+        "sid": sid,
+        "url": _subtitle_url(request, sid, token),
+        "language": str(body.get("language") or ""),
+        "name": str(body.get("name") or ""),
+        "routing": as_payload(routing),
+    }
+
+
+async def subtitle_playlist(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    token = _require_session(request)
+    offset_ms = _query_int(request, "o", 0)
+    rate_nano = _query_int(request, "r", 1_000_000_000)
+    try:
+        metadata = subtitles.metadata(sid)
+        offset, rate = offset_ms / 1000.0, rate_nano / 1_000_000_000
+        timeline = subtitles.timeline(metadata, offset, rate)
+        if not timeline:
+            raise ValueError("empty subtitle timeline")
+        base = _base_url(request)
+        query = _asset_query(request, offset_ms, rate_nano, token)
+        has_init = bool(metadata.get("init"))
+        lines = [
+            "#EXTM3U",
+            f"#EXT-X-VERSION:{7 if has_init else 3}",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+            f"#EXT-X-TARGETDURATION:{int(max(item['duration'] for item in timeline)) + 1}",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+        ]
+        if has_init:
+            lines.append(f'#EXT-X-MAP:URI="{base}/dual/sub/{sid}/init.mp4?{query}"')
+        for item in timeline:
+            lines += [
+                f"#EXTINF:{item['duration']:.6f},",
+                f"{base}/dual/sub/{sid}/s{item['idx']}.vtt?{query}",
+            ]
+        lines.append("#EXT-X-ENDLIST")
+        return web.Response(
+            text="\n".join(lines) + "\n",
+            content_type="application/vnd.apple.mpegurl",
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+        )
+    except FileNotFoundError as exc:
+        raise DualServiceError(410, "subtitle session expired") from exc
+    except ValueError as exc:
+        raise DualServiceError(404, str(exc)) from exc
+
+
+async def subtitle_init(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    _require_session(request)
+    try:
+        return _audio_response(await subtitles.init_bytes(sid), "video/mp4")
+    except FileNotFoundError as exc:
+        raise DualServiceError(410, "subtitle session expired") from exc
+    except asyncio.TimeoutError as exc:
+        raise DualServiceError(504, {
+            "code": "SUBTITLE_NETWORK_TIMEOUT",
+            "message": "subtitle upstream request timed out",
+        }) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise DualServiceError(404, str(exc)) from exc
+
+
+async def subtitle_segment(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    index = int(request.match_info["idx"])
+    _require_session(request)
+    offset_ms = _query_int(request, "o", 0)
+    rate_nano = _query_int(request, "r", 1_000_000_000)
+    try:
+        data, media_type = await subtitles.payload(
+            sid, index, offset_ms / 1000.0, rate_nano / 1_000_000_000
+        )
+        return _audio_response(data, media_type)
+    except FileNotFoundError as exc:
+        raise DualServiceError(410, "subtitle session expired") from exc
+    except asyncio.TimeoutError as exc:
+        raise DualServiceError(504, {
+            "code": "SUBTITLE_NETWORK_TIMEOUT",
+            "message": "subtitle upstream request timed out",
+        }) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise DualServiceError(404, str(exc)) from exc
+
+
 async def offset_lookup(request: web.Request) -> web.Response:
     body = await _json_body(request)
     _require_session(request, body)
@@ -363,6 +483,7 @@ async def _cleanup_loop(app: web.Application) -> None:
             await asyncio.sleep(BACKGROUND_CLEANUP_INTERVAL)
             sessions.cleanup()
             audio.cleanup_idle()
+            subtitles.cleanup_idle()
     except asyncio.CancelledError:
         raise
 
@@ -431,6 +552,7 @@ def memory_stats() -> dict:
         "rss_mb": round(rss_bytes / (1024 * 1024), 2),
         "audio_tracks": len(tracks),
         "pinned_audio_tracks": len(getattr(audio, "_pinned", {})) if audio is not None else 0,
+        "subtitle_tracks": len(getattr(subtitles, "_tracks", {})) if subtitles is not None else 0,
         "audio_cache": "memory_only",
         "offset_cache": "mongodb_shared",
     }
@@ -454,6 +576,9 @@ def install(app: web.Application, cache_dir: str | Path) -> None:
     app.router.add_get("/dual/aud/{hid}/audio.m3u8", audio_playlist)
     app.router.add_get("/dual/aud/{hid}/init.mp4", audio_init)
     app.router.add_get("/dual/aud/{hid}/s{idx:\\d+}.m4s", audio_segment)
+    app.router.add_get("/dual/sub/{sid}/subtitles.m3u8", subtitle_playlist)
+    app.router.add_get("/dual/sub/{sid}/init.mp4", subtitle_init)
+    app.router.add_get("/dual/sub/{sid}/s{idx:\\d+}.vtt", subtitle_segment)
     # Single public cache check retained for Toast Stream's offset indicator.
     app.router.add_post("/dual/cache/status", cache_status)
 
@@ -471,6 +596,8 @@ __all__ = [
     "memory_stats",
     "prepare_audio",
     "prepare_audio_data",
+    "prepare_subtitle_data",
+    "subtitles",
     "sync_audio",
     "sync_audio_data",
 ]

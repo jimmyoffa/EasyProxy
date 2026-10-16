@@ -1050,7 +1050,7 @@
 
                 <div class="table-section-title">&#x2728; DUAL Video + Audio</div>
                 <p class="endpoint-description">
-                    DUAL creates a single HLS manifest with synchronized video and audio. The service is integrated into EasyProxy and does not use a separate sidecar. The first request may take time for extraction, audio preparation, and synchronization.
+                    DUAL creates a single HLS manifest with synchronized video and audio. The service is integrated into EasyProxy and does not use a separate sidecar. The first request may take time for extraction, audio preparation, and synchronization. Subtitles carried by the video source are proxied unchanged; subtitles carried by the audio source are shifted with the audio.
                 </p>
                 <table class="api-table">
                     <thead>
@@ -1063,6 +1063,8 @@
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/aud/&lt;hid&gt;/audio.m3u8</code></td><td>Audio playlist converted and served by the proxy</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/aud/&lt;hid&gt;/init.mp4</code></td><td>Initial DUAL audio fMP4 segment</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/aud/&lt;hid&gt;/s&lt;idx&gt;.m4s</code></td><td>DUAL audio fMP4 segment</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/sub/&lt;sid&gt;/subtitles.m3u8</code></td><td>Audio-source subtitle playlist shifted like the audio</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/sub/&lt;sid&gt;/s&lt;idx&gt;.vtt</code></td><td>Shifted subtitle segment (video-source subtitles are proxied unchanged)</td></tr>
                         <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/dual/memory</code></td><td>Active DUAL memory usage and audio tracks</td></tr>
                     </tbody>
                 </table>

@@ -10,8 +10,8 @@ import weakref
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from .security import resolves_publicly, valid_public_url
-from .http_client import client_session
+from .security import valid_public_url
+from .http_client import download_asset
 from .routing import RoutingOptions
 
 
@@ -263,56 +263,14 @@ class AudioStore:
         destination: Path,
         routing: RoutingOptions | None = None,
     ):
-        current_url = url
-        routing = routing or self.default_routing
-        for redirect_count in range(self.MAX_REDIRECTS + 1):
-            if not valid_public_url(current_url) or not await resolves_publicly(current_url):
-                raise ValueError("audio URL is not public HTTPS")
-            proxy = routing.proxy_for(current_url)
-            async with client_session(proxy, timeout=30) as (client, request_proxy):
-                async with client.get(
-                    current_url,
-                    headers=headers,
-                    proxy=request_proxy,
-                    allow_redirects=False,
-                ) as response:
-                    if response.status in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("Location", "").strip()
-                        if not location:
-                            raise ValueError("audio redirect has no location")
-                        next_url = urljoin(current_url, location)
-                        if not valid_public_url(next_url) or not await resolves_publicly(next_url):
-                            raise ValueError("audio redirect is not public HTTPS")
-                        if redirect_count >= self.MAX_REDIRECTS:
-                            raise ValueError("too many audio redirects")
-                        current_url = next_url
-                        continue
-
-                    response.raise_for_status()
-                    content_length = response.headers.get("Content-Length")
-                    if content_length:
-                        try:
-                            if int(content_length) > self.MAX_SEGMENT_BYTES:
-                                raise ValueError("audio segment too large")
-                        except ValueError as exc:
-                            if str(exc) == "audio segment too large":
-                                raise
-                            raise ValueError("invalid audio content length") from exc
-
-                    try:
-                        total = 0
-                        with destination.open("wb") as output:
-                            async for chunk in response.content.iter_chunked(64 * 1024):
-                                total += len(chunk)
-                                if total > self.MAX_SEGMENT_BYTES:
-                                    raise ValueError("audio segment too large")
-                                output.write(chunk)
-                    except Exception:
-                        destination.unlink(missing_ok=True)
-                        raise
-                    return total
-
-        raise ValueError("too many audio redirects")
+        return await download_asset(
+            url,
+            headers,
+            destination,
+            routing or self.default_routing,
+            max_redirects=self.MAX_REDIRECTS,
+            max_bytes=self.MAX_SEGMENT_BYTES,
+        )
 
     @staticmethod
     def _boxes(data: bytes, start=0, end=None):

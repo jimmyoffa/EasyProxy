@@ -361,6 +361,9 @@ class HLSProxyPagesMixin:
                 "/dual/aud/{hid}/audio.m3u8": "Synchronized DUAL audio playlist",
                 "/dual/aud/{hid}/init.mp4": "DUAL audio init segment",
                 "/dual/aud/{hid}/s{idx}.m4s": "DUAL audio segment",
+                "/dual/sub/{sid}/subtitles.m3u8": "DUAL audio-source subtitle playlist shifted onto the audio timeline",
+                "/dual/sub/{sid}/init.mp4": "DUAL subtitle init segment (fMP4 renditions only)",
+                "/dual/sub/{sid}/s{idx}.vtt": "DUAL subtitle segment shifted onto the audio timeline",
             },
             "usage_examples": {
                 "proxy_hls": "/proxy/hls/manifest.m3u8?d=https://example.com/stream.m3u8",
@@ -557,6 +560,38 @@ class HLSProxyPagesMixin:
                         "description": "Returns one active DUAL audio segment after applying the requested offset/rate.",
                         "parameters": [{"name": "hid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "idx", "in": "path", "required": True, "schema": {"type": "integer"}}, {"name": "o", "in": "query", "schema": {"type": "integer"}}, {"name": "r", "in": "query", "schema": {"type": "integer"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
                         "responses": {"200": {"description": "Audio segment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Audio session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sub/{sid}/subtitles.m3u8": {
+                    "get": {
+                        "summary": "Serve shifted audio-source subtitle playlist",
+                        "description": "Returns the subtitle playlist of the audio source with the DUAL offset/rate already applied to its segment timeline.",
+                        "parameters": [
+                            {"name": "sid", "in": "path", "required": True, "schema": {"type": "string"}},
+                            {"name": "o", "in": "query", "schema": {"type": "integer", "default": 0}, "description": "Offset in milliseconds."},
+                            {"name": "r", "in": "query", "schema": {"type": "integer", "default": 1000000000}, "description": "Playback rate in nano-units."},
+                            {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "Subtitle HLS playlist"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Subtitle session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sub/{sid}/init.mp4": {
+                    "get": {
+                        "summary": "Serve subtitle fragmented MP4 init",
+                        "description": "Returns the initialization fragment when the audio-source subtitles are fMP4 (wvtt) renditions.",
+                        "parameters": [{"name": "sid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "MP4 initialization fragment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Subtitle session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sub/{sid}/s{idx}.vtt": {
+                    "get": {
+                        "summary": "Serve shifted subtitle segment",
+                        "description": "Returns one subtitle segment with cue times mapped to the audio timeline by (t + offset) / rate.",
+                        "parameters": [{"name": "sid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "idx", "in": "path", "required": True, "schema": {"type": "integer"}}, {"name": "o", "in": "query", "schema": {"type": "integer"}}, {"name": "r", "in": "query", "schema": {"type": "integer"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "Subtitle segment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Subtitle session expired"}},
                         **({"security": security} if requires_password else {}),
                     }
                 },
