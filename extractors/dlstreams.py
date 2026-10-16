@@ -105,6 +105,10 @@ class DLStreamsExtractor(BaseExtractor):
         }
         self.session = None
         self._route_sessions = {}
+        # Lazy direct session for segment probes on warp-excluded hosts
+        # (see _probe_session_for): playback fetches those direct, so the
+        # liveness check must test that path, not the WARP extractor session.
+        self._direct_probe_session = None
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self.proxies = proxies or []
         self.bypass_warp_active = bypass_warp
@@ -338,12 +342,54 @@ class DLStreamsExtractor(BaseExtractor):
                 unknown = True
         return False if audio and not unknown else None
 
+    async def _get_direct_probe_session(self):
+        """Plain direct session for probing warp-excluded segment hosts.
+
+        Playback serves those segments direct (warp_exclude_domains); probing
+        them through WARP produced intermittent 403s that flipped the chosen
+        source on every re-extraction, stalling playback mid-stream.
+        """
+        session = self._direct_probe_session
+        if session is not None and not session.closed:
+            return session
+        session = ClientSession(
+            timeout=ClientTimeout(total=30, connect=10),
+            connector=TCPConnector(limit=0, limit_per_host=0),
+            headers=self.base_headers,
+        )
+        self._direct_probe_session = session
+        return session
+
+    async def _probe_session_for(self, url: str, session):
+        """Session matching the playback route for a segment URL.
+
+        Warp-excluded hosts (e.g. tiktokcdn) are fetched direct at playback:
+        proxy_core treats "warp-excluded with no proxy left in the chain" as
+        direct-only even when direct fallback is otherwise disabled, and the
+        serving request here carries proxy=off anyway. Probing those hosts
+        through WARP produced intermittent 403s that flipped the chosen
+        source on every re-extraction, stalling playback mid-stream.
+        Anything else keeps the extractor session (manifest path is WARP).
+        """
+        try:
+            if _cfg._is_warp_excluded(url):
+                logger.debug("DLStreams: probing %s direct (warp-excluded)", self._host_of(url))
+                return await self._get_direct_probe_session()
+        except Exception as e:
+            logger.debug("DLStreams: probe routing check failed, keeping extractor session: %s", e)
+        return session
+
     async def _segment_carries_video(
         self, session, segment_url: str, headers: dict, timeout: float,
         deep: bool = True, encrypted: bool = False,
     ) -> bool:
         """Bounded probe; stop downloading native TS as soon as video is found."""
         max_bytes = 16 * 1024 * 1024
+        # Probe the segment on its playback route: warp-excluded CDN hosts
+        # are served direct, and WARP probes 403 intermittently there. This
+        # wraps the upstream video-PES inspection without changing it: the
+        # route matches playback, the verdict logic stays upstream's.
+        session = await self._probe_session_for(segment_url, session)
         async with session.get(
             segment_url, headers=headers, timeout=ClientTimeout(total=timeout)
         ) as resp:
@@ -894,8 +940,11 @@ class DLStreamsExtractor(BaseExtractor):
         sessions = set(self._route_sessions.values())
         if self.session is not None:
             sessions.add(self.session)
+        if self._direct_probe_session is not None:
+            sessions.add(self._direct_probe_session)
         for session in sessions:
             if not session.closed:
                 await session.close()
         self._route_sessions.clear()
         self.session = None
+        self._direct_probe_session = None
