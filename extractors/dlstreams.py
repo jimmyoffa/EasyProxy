@@ -99,6 +99,15 @@ class DLStreamsExtractor(BaseExtractor):
     # this many consecutive rounds while the last-served URL still probes
     # alive; moves up (or to the same source) always win immediately.
     SOURCE_DAMP_STRIKES = 1
+    # Transient-outage ride-through: when a fresh re-scrape fails AND the
+    # cached URL probes dead, still serve the cached URL for this long after
+    # the last successful validation instead of handing the player a dead
+    # fallback URL (whose upstream 404 would kill the session for good).
+    # Segment signatures (TikTok x-expires, assetrage e=) outlive the master
+    # playlist, so the player keeps consuming buffer and recovers alone.
+    # Bounded by consecutive-serve cap so a truly dead source is given up.
+    STALE_DEAD_GRACE_SECONDS = 90.0
+    STALE_DEAD_MAX_CONSECUTIVE = 6
     MAX_HOST_BACKOFF_SECONDS = 3600.0
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
@@ -124,6 +133,10 @@ class DLStreamsExtractor(BaseExtractor):
         # page and consecutive deferred down-moves. See _damp_downmove.
         self._last_served_candidate: dict = {}
         self._downmove_strikes: dict = {}
+        # Transient-outage ride-through state (per channel_key): monotonic
+        # time of last successful validation + consecutive dead-stale serves.
+        self._last_validated_at: dict = {}
+        self._dead_stale_serves: dict = {}
         # host -> monotonic deadline: honour upstream Retry-After instead of
         # scraping a host that already said "too many requests".
         self._host_backoff: dict[str, float] = {}
@@ -924,8 +937,12 @@ class DLStreamsExtractor(BaseExtractor):
                         "DLStreams: extraction failed for %s, serving last known stream URL",
                         channel_key,
                     )
+                    self._dead_stale_serves[channel_key] = 0
                     self._backoff_cache_entry(channel_key, cached)
                     return dict(cached[2])
+                ride_through = self._serve_dead_stale(channel_key, cached)
+                if ride_through is not None:
+                    return ride_through
                 logger.warning(
                     "DLStreams: cached stream for %s is dead, not serving stale",
                     channel_key,
@@ -941,6 +958,7 @@ class DLStreamsExtractor(BaseExtractor):
                         channel_key,
                     )
                     self._downmove_strikes[channel_key] = self._downmove_strikes.get(channel_key, 0) + 1
+                    self._dead_stale_serves[channel_key] = 0
                     self._backoff_cache_entry(channel_key, cached)
                     return dict(cached[2])
                 logger.warning(
@@ -957,14 +975,41 @@ class DLStreamsExtractor(BaseExtractor):
                 now + self.STREAM_CACHE_STALE_SECONDS,
                 dict(result),
             )
+            self._last_validated_at[channel_key] = now
+            self._dead_stale_serves[channel_key] = 0
         elif result and cached and cached[1] > time.monotonic():
             if await self._is_cached_still_alive(cached[2]):
                 logger.warning(
                     "DLStreams: no player validated for %s, serving last known stream URL",
                     channel_key,
                 )
+                self._dead_stale_serves[channel_key] = 0
                 self._backoff_cache_entry(channel_key, cached)
                 return dict(cached[2])
+            ride_through = self._serve_dead_stale(channel_key, cached)
+            if ride_through is not None:
+                return ride_through
+            logger.warning(
+                "DLStreams: cached stream for %s is dead, not serving stale",
+                channel_key,
+            )
+        elif cached and cached[1] > time.monotonic():
+            # Upstream 26f9c9e removed the dead-fallback return: when no
+            # player validates, result is None instead of a dead URL. Cover
+            # that path with the same stale/ride-through treatment, so a
+            # transient dual-backend outage still rides through on cache
+            # instead of killing the session with nothing to serve.
+            if await self._is_cached_still_alive(cached[2]):
+                logger.warning(
+                    "DLStreams: extraction found nothing for %s, serving last known stream URL",
+                    channel_key,
+                )
+                self._dead_stale_serves[channel_key] = 0
+                self._backoff_cache_entry(channel_key, cached)
+                return dict(cached[2])
+            ride_through = self._serve_dead_stale(channel_key, cached)
+            if ride_through is not None:
+                return ride_through
             logger.warning(
                 "DLStreams: cached stream for %s is dead, not serving stale",
                 channel_key,
@@ -983,15 +1028,47 @@ class DLStreamsExtractor(BaseExtractor):
             cached[2],
         )
 
+    def _serve_dead_stale(self, channel_key, cached: tuple[float, float, dict]):
+        """Serve the cached URL even though its probe just failed.
+
+        Returns the cached result dict while inside the transient-outage
+        grace window, else None (caller keeps the previous behaviour).
+        Applies backoff so the failing origin is not hammered every poll.
+        """
+        now = time.monotonic()
+        last_ok = self._last_validated_at.get(channel_key, 0.0)
+        serves = self._dead_stale_serves.get(channel_key, 0)
+        if now - last_ok > self.STALE_DEAD_GRACE_SECONDS:
+            return None
+        if serves >= self.STALE_DEAD_MAX_CONSECUTIVE:
+            return None
+        self._dead_stale_serves[channel_key] = serves + 1
+        logger.warning(
+            "DLStreams: upstream outage, serving stale for %s despite failed probe "
+            "(ride-through %d/%d)",
+            channel_key,
+            serves + 1,
+            self.STALE_DEAD_MAX_CONSECUTIVE,
+        )
+        self._backoff_cache_entry(channel_key, cached)
+        return dict(cached[2])
+
     async def _is_cached_still_alive(self, cached_result: dict) -> bool:
-        """Bounded video probe before serving a stale URL after a failed refresh."""
+        """Cheap HTTP-only probe before serving a stale URL after a failed refresh.
+
+        deep=False on purpose: the upstream default (full video-PES segment
+        download, up to 16MB) is too heavy and too slow for a per-poll
+        liveness check -- it would time out on big Player 1 segments and
+        wrongly condemn healthy stale URLs. Frozen-backend detection stays
+        with the 861 quarantine, not with this probe.
+        """
         try:
             stream_url = (cached_result or {}).get("destination_url", "")
             if not stream_url:
                 return False
             headers = (cached_result or {}).get("request_headers", {}) or {}
             session = await self._get_session(stream_url)
-            return await self._is_stream_alive(session, stream_url, headers, budget=4.0)
+            return await self._is_stream_alive(session, stream_url, headers, budget=4.0, deep=False)
         except Exception:
             return False
 
