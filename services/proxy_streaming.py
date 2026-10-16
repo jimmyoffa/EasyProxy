@@ -1557,6 +1557,24 @@ class HLSProxyStreamingMixin:
                         max_res=self._request_forces_max_res(request, extractor_key, "hls"),
                         dual_video_track=dual_video_track,
                     )
+                    # Never hand the player an empty/segment-less media
+                    # playlist: a 200 with 0 segments (seen as 200 0 / 200 302
+                    # on 868 during outages) kills the session just like a 404.
+                    if "#EXT-X-STREAM-INF" not in rewritten and not any(
+                        line.strip() and not line.strip().startswith("#")
+                        for line in rewritten.splitlines()
+                    ):
+                        logger.warning(
+                            "Upstream manifest for %s has no playable segments (%d bytes), returning 503 instead of empty playlist [%s]",
+                            stream_url,
+                            len(rewritten),
+                            log_context(session_proxy or forced_proxy),
+                        )
+                        return web.Response(
+                            text="Upstream playlist temporarily empty, retrying",
+                            status=503,
+                            headers={"Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*", "Retry-After": "5", "Cache-Control": "no-cache"},
+                        )
                     return web.Response(text=rewritten, headers={
                         "Content-Type": "application/vnd.apple.mpegurl",
                         "Access-Control-Allow-Origin": "*",
