@@ -244,38 +244,22 @@ class DLStreamsExtractor(BaseExtractor):
 
     def _build_player_urls(self, channel_id: str, requested_url: str = "") -> list[str]:
         origin = self.entry_origin.rstrip("/")
-        req_lower = (requested_url or "").lower()
-        if "/stream/stream-" in req_lower:
-            # User explicitly requested Player 1 (/stream/)
-            return [
-                f"{origin}/stream/stream-{channel_id}.php",
-                f"{origin}/cast/stream-{channel_id}.php",
-                f"{origin}/watch/stream-{channel_id}.php",
-                f"{origin}/plus/stream-{channel_id}.php",
-                f"{origin}/casting/stream-{channel_id}.php",
-                f"{origin}/player/stream-{channel_id}.php",
-                f"{origin}/hub/stream-{channel_id}.php",
-            ]
-        # Default: prioritize Player 2 (/cast/) because it provides clean native MPEG-TS (.ts)
-        # without the heavy (7MB+) PNG-wrapped TikTok CDN overhead and frequent 403s of Player 1.
-        # Exception: 861 always tries Player 1 first, even when its Player 2 looks
-        # online in a browser. That backend serves a technically valid stream (HTTP 200,
-        # valid MPEG-TS container, advancing timestamps, decodable-looking frames) whose
-        # video track is unplayable, so every cheap liveness probe promotes it while
-        # playback shows green/black with working audio. The failure only surfaces at
-        # decode time, which no proxy-side check can afford to replicate -- every
-        # simpler approach was tried and discarded, this pin is the fix.
-        first = "stream" if channel_id == "861" else "cast"
-        second = "cast" if channel_id == "861" else "stream"
-        return [
-            f"{origin}/{first}/stream-{channel_id}.php",
-            f"{origin}/{second}/stream-{channel_id}.php",
-            f"{origin}/watch/stream-{channel_id}.php",
-            f"{origin}/plus/stream-{channel_id}.php",
-            f"{origin}/casting/stream-{channel_id}.php",
-            f"{origin}/player/stream-{channel_id}.php",
-            f"{origin}/hub/stream-{channel_id}.php",
-        ]
+        # Personal branch: Player 2 (/cast/) is always last resort, for every
+        # channel and with no per-channel pins. That backend can serve a
+        # technically valid stream (HTTP 200, valid MPEG-TS, advancing timestamps)
+        # whose video track is unplayable, so every cheap liveness probe promotes
+        # it while playback shows green/black with working audio -- and placed
+        # second it shadows the truly working players behind it. The order
+        # otherwise follows the site's player list. If Player 2 is ever the only
+        # working backend, the loop still reaches it, so playback starts anyway.
+        # NOTE: this also means Player 1 (image-wrapped, heavier and 403-prone)
+        # is tried first everywhere: upstream will never take this as-is.
+        # This is the BASE order: _prioritize_player_urls (upstream) moves the
+        # explicitly requested or site-active player to the front; everything
+        # else keeps this order, so Player 2 stays last unless the site itself
+        # serves it as active (or the user requests it outright).
+        order = ["stream", "watch", "plus", "casting", "player", "hub", "cast"]
+        return [f"{origin}/{folder}/stream-{channel_id}.php" for folder in order]
 
     @staticmethod
     def _inherit_query_if_missing(absolute_url: str, base_url: str) -> str:
