@@ -1,5 +1,4 @@
 import asyncio
-import secrets
 import urllib.parse
 import aiohttp
 import config as _config
@@ -271,14 +270,16 @@ class HLSProxyManifestHandlerMixin:
 
             # Every new playback gets its own routing/session namespace. The
             # key is propagated into generated HLS/DASH URLs; stream requests
-            # that already carry it keep it unchanged.
+            # that already carry it keep it unchanged. Reuse per source+client
+            # (60s window): minting a fresh key per poll created and closed one
+            # upstream session per poll instead of reusing it.
             stream_key = request.query.get("stream_key")
             is_rewritten_hls_segment = request.path.startswith("/proxy/hls/segment.")
             if not stream_key and not is_rewritten_hls_segment:
                 source_key = self._stream_key_for_url(
                     request.query.get("orig_url") or target_url
                 ) or "stream"
-                stream_key = f"{source_key}-{secrets.token_hex(6)}"
+                stream_key = self._reuse_stream_key(source_key, get_client_ip(request))
 
             # Record stream activity
             is_segment = (
