@@ -395,7 +395,7 @@ class HLSProxyCoreMixin:
                 if healthy:
                     if consecutive_failures:
                         logger.warning(
-                            "WARP health recovered after %s failed probe(s)",
+                            "WARP health recovered after %s missed probe(s)",
                             consecutive_failures,
                         )
                     consecutive_failures = 0
@@ -403,7 +403,7 @@ class HLSProxyCoreMixin:
 
                 consecutive_failures += 1
                 logger.warning(
-                    "WARP health check failed (%s/2): %s",
+                    "WARP health check missed (%s/2): %s",
                     consecutive_failures,
                     reason,
                 )
@@ -416,7 +416,7 @@ class HLSProxyCoreMixin:
                     logger.warning("WARP auto-reconnect succeeded")
                     consecutive_failures = 0
                 else:
-                    logger.warning("WARP auto-reconnect skipped/failed: %s", message or result)
+                    logger.warning("WARP auto-reconnect skipped/unsuccessful: %s", message or result)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
