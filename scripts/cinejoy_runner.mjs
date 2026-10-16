@@ -10,6 +10,21 @@ const log = (...args) => {
   if (debug) console.error("[cinejoy]", ...args);
 };
 
+// undici reports network failures as "fetch failed" and hides the real reason
+// (DNS, connect, TLS, proxy) in error.cause. Surface the whole chain.
+function describeError(error) {
+  const parts = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const text = typeof current === "string" ? current : current.message || String(current);
+    const code = typeof current === "object" ? current.code : undefined;
+    const label = code && !text.includes(code) ? `${code}: ${text}` : text;
+    if (label && !parts.includes(label)) parts.push(label);
+    current = typeof current === "object" ? current.cause : undefined;
+  }
+  return parts.join(" <- ") || String(error);
+}
+
 if (!input) {
   console.log(JSON.stringify({ error: "usage: cinejoy_runner.mjs <url_or_json>" }));
   process.exit(2);
@@ -34,9 +49,9 @@ if (process.env.CINEJOY_PROXY && /^https?:\/\//i.test(process.env.CINEJOY_PROXY)
   try {
     const undici = await import("undici");
     proxyDispatcher = new undici.ProxyAgent(process.env.CINEJOY_PROXY);
-    fetchImpl = undici.fetch;
+    fetchImpl = undici.fetch.bind(undici);
   } catch (err) {
-    log("Proxy agent unavailable:", err.message);
+    console.error("[cinejoy] HTTP proxy unavailable, continuing direct:", describeError(err));
   }
 }
 
@@ -317,7 +332,7 @@ try {
   console.log(JSON.stringify(result));
 } catch (err) {
   if (debug && err?.stack) console.error(err.stack);
-  console.log(JSON.stringify({ error: err?.message || String(err) }));
+  console.log(JSON.stringify({ error: describeError(err) }));
   process.exitCode = 1;
 } finally {
   if (proxyDispatcher) {

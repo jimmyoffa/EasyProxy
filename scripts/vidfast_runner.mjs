@@ -13,6 +13,21 @@ const log = (...args) => {
   if (debug) fs.writeSync(2, "[vidfast] " + args.map(item => typeof item === "string" ? item : String(item)).join(" ") + "\n");
 };
 
+// undici reports network failures as "fetch failed" and hides the real reason
+// (DNS, connect, TLS, proxy) in error.cause. Surface the whole chain.
+function describeError(error) {
+  const parts = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const text = typeof current === "string" ? current : current.message || String(current);
+    const code = typeof current === "object" ? current.code : undefined;
+    const label = code && !text.includes(code) ? `${code}: ${text}` : text;
+    if (label && !parts.includes(label)) parts.push(label);
+    current = typeof current === "object" ? current.cause : undefined;
+  }
+  return parts.join(" <- ") || String(error);
+}
+
 if (!inputUrl) {
   writeOut(JSON.stringify({ error: "usage: vidfast_runner.mjs <url>" }));
   process.exit(2);
@@ -25,10 +40,14 @@ const minimumStreamHeight = Number(process.env.VIDFAST_MIN_HEIGHT || 0);
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
-const nativeFetch = globalThis.fetch.bind(globalThis);
+// Node's built-in fetch rejects dispatchers built by a differently-versioned
+// undici (UND_ERR_INVALID_ARG: invalid onRequestStart method), so when a proxy
+// dispatcher is active, fetch must come from the same undici module.
+let nativeFetch = globalThis.fetch.bind(globalThis);
 const nativeCrypto = globalThis.crypto ?? webcrypto;
 const cookies = new Map();
 let proxyDispatcher = null;
+let undiciModule = null;
 
 // Node 18 provides Blob but not the browser-compatible File global.
 const NativeFile = globalThis.File ?? class File extends Blob {
@@ -45,11 +64,12 @@ const NativeFile = globalThis.File ?? class File extends Blob {
 
 if (process.env.VIDFAST_PROXY && /^https?:\/\//i.test(process.env.VIDFAST_PROXY)) {
   try {
-    const { ProxyAgent } = await import("undici");
-    proxyDispatcher = new ProxyAgent(process.env.VIDFAST_PROXY);
+    const undici = await import("undici");
+    undiciModule = undici;
+    proxyDispatcher = new undici.ProxyAgent(process.env.VIDFAST_PROXY);
+    nativeFetch = undici.fetch.bind(undici);
   } catch (error) {
-    log("HTTP proxy unavailable:", error.message);
-    throw error;
+    fs.writeSync(2, "[vidfast] HTTP proxy unavailable, continuing direct: " + describeError(error) + "\n");
   }
 }
 
@@ -237,7 +257,13 @@ const context = {
   Buffer, URL, URLSearchParams, TextEncoder, TextDecoder,
   atob: value => Buffer.from(value, "base64").toString("binary"),
   btoa: value => Buffer.from(value, "binary").toString("base64"),
-  AbortController, AbortSignal, Request, Response, Headers, FormData,
+  AbortController, AbortSignal,
+  // Branded classes must come from the same module as fetch, or the player's
+  // instanceof checks fail when a proxy dispatcher switches us to undici.fetch.
+  Request: undiciModule ? undiciModule.Request : Request,
+  Response: undiciModule ? undiciModule.Response : Response,
+  Headers: undiciModule ? undiciModule.Headers : Headers,
+  FormData: undiciModule ? undiciModule.FormData : FormData,
   ReadableStream, Blob, File: NativeFile, TextEncoderStream, TextDecoderStream,
   WebAssembly, crypto: nativeCrypto, navigator, location, document,
   localStorage, sessionStorage, window: null, self: null, globalThis: null, global: null,
@@ -567,7 +593,7 @@ try {
   writeOut(JSON.stringify(await resolve()));
 } catch (error) {
   if (debug && error?.stack) log(error.stack);
-  writeOut(JSON.stringify({ error: error?.message || String(error) }));
+  writeOut(JSON.stringify({ error: describeError(error) }));
   exitCode = 1;
 } finally {
   if (proxyDispatcher) {

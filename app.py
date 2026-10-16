@@ -138,7 +138,9 @@ def create_app():
     app.router.add_post('/api/admin/warp/reconnect', proxy.handle_admin_api_warp_reconnect)
     app.router.add_post('/api/admin/extractor/proxy', proxy.handle_admin_api_extractor_proxy)
     app.router.add_post('/api/admin/speedtest', proxy.handle_admin_api_speedtest)
+    app.router.add_get('/api/admin/speedtest', proxy.handle_admin_api_speedtest_status)
     app.router.add_post('/api/admin/extractors/test', proxy.handle_admin_api_test_extractors)
+    app.router.add_get('/api/admin/extractors/test', proxy.handle_admin_api_test_extractors_status)
     # Setup recording/DVR routes
     setup_recording_routes(app, recording_manager)
     # NordVPN / custom WireGuard SOCKS5 tunnels + their admin panels

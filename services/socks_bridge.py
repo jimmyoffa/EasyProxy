@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 _SOCKS_SCHEMES = ("socks5://", "socks5h://", "socks4://", "socks4a://")
 
 
+def _normalize_socks_url(url: str) -> str:
+    """python_socks rejects the socks5h/socks4a scheme spellings (it already
+    forwards hostnames to the proxy), so map them to the plain scheme."""
+    lower = url.lower()
+    if lower.startswith("socks5h://"):
+        return "socks5://" + url[len("socks5h://"):]
+    if lower.startswith("socks4a://"):
+        return "socks4://" + url[len("socks4a://"):]
+    return url
+
+
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         while True:
@@ -135,6 +146,8 @@ class SocksHttpBridgeManager:
 
         if not lower_url.startswith(_SOCKS_SCHEMES):
             return clean_url
+
+        clean_url = _normalize_socks_url(clean_url)
 
         async with self._lock:
             if clean_url in self._ports:

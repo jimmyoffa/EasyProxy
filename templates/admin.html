@@ -681,19 +681,12 @@ function updateSpeedtestButtons(cfg) {
     // No-op: single button, always enabled
 }
 
-async function runAllSpeedtests() {
-    const btn = document.getElementById('speedtest-btn');
-    if (btn.disabled) return;
+function renderSpeedtestResults(data) {
     const result = document.getElementById('speedtest-result');
-    btn.disabled = true;
-    btn.innerHTML = '⏳ Running...';
     result.style.display = 'block';
-    result.innerHTML = 'Running speed tests...';
-    try {
-        const resp = await fetch('/api/admin/speedtest', { method: 'POST' });
-        const data = await resp.json();
-        if (data.error) { result.innerHTML = '❌ ' + data.error; return; }
-        result.innerHTML = '<div>' + data.results.map(function(r) {
+    if (data.error) { result.innerHTML = 'Error: ' + data.error; return; }
+    if (!data.results || !data.results.length) { result.innerHTML = 'No results (run not started?)'; return; }
+    result.innerHTML = '<div>' + data.results.map(function(r) {
             if (r.error) {
                 return '<div class="speedtest-card error">' +
                     '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + r.name + '</div>' +
@@ -702,19 +695,67 @@ async function runAllSpeedtests() {
             return '<div class="speedtest-card">' +
                 '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + r.name + '</div>' +
                 (r.proxy_used ? '<div style="font-size:0.65rem;color:var(--accent-orange);margin-bottom:2px">📡 ' + r.proxy_used + '</div>' : '') +
-                (r.external_ip ? '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">IP uscente: ' + r.external_ip + '</div>' : '') +
+                (r.external_ip ? '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">Exit IP: ' + r.external_ip + '</div>' : '') +
                 '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:4px">' + (r.server.sponsor && r.server.sponsor !== 'Unknown' ? r.server.sponsor + ' · ' : '') + r.server.location + '</div>' +
                 '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">Ping</span><span style="color:var(--accent-primary)">' + r.ping_ms + ' ms</span></div>' +
                 '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬇ Download</span><span style="color:var(--accent-success);font-weight:700">' + r.download_mbps + ' Mbps</span></div>' +
                 '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">⬆ Upload</span><span style="color:var(--accent-success);font-weight:700">' + r.upload_mbps + ' Mbps</span></div>' +
             '</div>';
-        }).join('') + '</div>';
+    }).join('') + '</div>';
+}
+
+async function pollAdminJob(url, resultEl, busyText) {
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let data = null;
+    while (Date.now() < deadline) {
+        await new Promise(function(r) { setTimeout(r, 2000); });
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        data = await resp.json();
+        if (data.status !== 'running') break;
+        resultEl.innerHTML = busyText;
+    }
+    if (!data || data.status === 'running') throw new Error('timeout');
+    return data;
+}
+
+async function runAllSpeedtests() {
+    const btn = document.getElementById('speedtest-btn');
+    if (btn.disabled) return;
+    const result = document.getElementById('speedtest-result');
+    btn.disabled = true;
+    btn.innerHTML = 'Running...';
+    result.style.display = 'block';
+    result.innerHTML = 'Running speed tests...';
+    try {
+        await fetch('/api/admin/speedtest', { method: 'POST' });
+        renderSpeedtestResults(await pollAdminJob('/api/admin/speedtest', result, 'Running speed tests... (can take a few minutes)'));
     } catch (e) {
-        result.innerHTML = '❌ Error: ' + e.message;
+        result.innerHTML = 'Error: ' + e.message;
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '🚀 Run Speed Tests';
+        btn.innerHTML = 'Run Speed Tests';
     }
+}
+
+// Page load: resume an in-flight run or show the last results.
+async function initSpeedtest() {
+    const btn = document.getElementById('speedtest-btn');
+    const result = document.getElementById('speedtest-result');
+    try {
+        const resp = await fetch('/api/admin/speedtest');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.status === 'running') {
+            btn.disabled = true;
+            result.style.display = 'block';
+            result.innerHTML = 'Running speed tests...';
+            renderSpeedtestResults(await pollAdminJob('/api/admin/speedtest', result, 'Running speed tests... (can take a few minutes)'));
+            btn.disabled = false;
+        } else if (data.results && data.results.length) {
+            renderSpeedtestResults(data);
+        }
+    } catch (e) {}
 }
 
 const EXTRACTOR_LABELS = { f16px: 'F16Px / Byse' };
@@ -723,38 +764,63 @@ function extractorLabel(name) {
     return EXTRACTOR_LABELS[name] || name;
 }
 
+function renderExtractorResults(data) {
+    const result = document.getElementById('extractors-test-result');
+    result.style.display = 'block';
+    if (data.error) { result.innerHTML = 'Error: ' + data.error; return; }
+    const rows = (data.results || []).map(function(r) {
+        const cls = r.ok ? 'speedtest-card' : 'speedtest-card error';
+        const icon = r.ok ? '✅' : '❌';
+        const detail = r.ok
+            ? ''
+            : '<div style="color:var(--accent-error);font-size:0.7rem;word-break:break-all">' + (r.error || 'failed').replace(/https?:\/\/\S+/g, '🔗') + '</div>';
+        return '<div class="' + cls + '">' +
+            '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + icon + ' ' + extractorLabel(r.extractor) + '</div>' +
+            detail + '</div>';
+    }).join('');
+    const skipped = (data.skipped || []).length
+        ? '<div style="grid-column:1/-1;color:var(--text-muted);font-size:0.7rem">Skipped (no link): ' + data.skipped.map(extractorLabel).join(', ') + '</div>'
+        : '';
+    result.innerHTML = '<div>' + rows + skipped + '</div>';
+}
+
 async function runExtractorTests() {
     const btn = document.getElementById('extractors-test-btn');
     if (btn.disabled) return;
     const result = document.getElementById('extractors-test-result');
     btn.disabled = true;
-    btn.innerHTML = '⏳ Testing...';
+    btn.innerHTML = 'Testing...';
     result.style.display = 'block';
     result.innerHTML = 'Running extractor tests...';
     try {
-        const resp = await fetch('/api/admin/extractors/test', { method: 'POST' });
-        const data = await resp.json();
-        if (data.error) { result.innerHTML = '❌ ' + data.error; return; }
-        const rows = (data.results || []).map(function(r) {
-            const cls = r.ok ? 'speedtest-card' : 'speedtest-card error';
-            const icon = r.ok ? '✅' : '❌';
-            const detail = r.ok
-                ? ''
-                : '<div style="color:var(--accent-error);font-size:0.7rem;word-break:break-all">' + (r.error || 'failed').replace(/https?:\/\/\S+/g, '…') + '</div>';
-            return '<div class="' + cls + '">' +
-                '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + icon + ' ' + extractorLabel(r.extractor) + '</div>' +
-                detail + '</div>';
-        }).join('');
-        const skipped = (data.skipped || []).length
-            ? '<div style="grid-column:1/-1;color:var(--text-muted);font-size:0.7rem">Skipped (no link): ' + data.skipped.map(extractorLabel).join(', ') + '</div>'
-            : '';
-        result.innerHTML = '<div>' + rows + skipped + '</div>';
+        await fetch('/api/admin/extractors/test', { method: 'POST' });
+        renderExtractorResults(await pollAdminJob('/api/admin/extractors/test', result, 'Testing extractors... (can take a few minutes)'));
     } catch (e) {
-        result.innerHTML = '❌ Error: ' + e.message;
+        result.innerHTML = 'Error: ' + e.message;
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '🧪 Test Extractors';
+        btn.innerHTML = 'Test Extractors';
     }
+}
+
+// Page load: resume an in-flight run or show the last results.
+async function initExtractorTests() {
+    const btn = document.getElementById('extractors-test-btn');
+    const result = document.getElementById('extractors-test-result');
+    try {
+        const resp = await fetch('/api/admin/extractors/test');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.status === 'running') {
+            btn.disabled = true;
+            result.style.display = 'block';
+            result.innerHTML = 'Testing extractors...';
+            renderExtractorResults(await pollAdminJob('/api/admin/extractors/test', result, 'Testing extractors... (can take a few minutes)'));
+            btn.disabled = false;
+        } else if ((data.results && data.results.length) || data.error) {
+            renderExtractorResults(data);
+        }
+    } catch (e) {}
 }
 
 function renderActiveStreams(streams) {
@@ -1369,6 +1435,8 @@ async function removeProxyExcludeDomain(domain) {
 }
 
 loadConfig();
+initSpeedtest();
+initExtractorTests();
 
 // Poll system resources every 5 seconds
 setInterval(async () => {

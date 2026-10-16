@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 import asyncio
 import shutil
 import urllib.parse
@@ -16,7 +17,7 @@ from services import tor_proxy
 from services.proxy_shared import (
     logger, web, APP_VERSION,
     check_password, get_client_ip, PlaylistBuilder, ClientSession, ClientTimeout,
-    TCPConnector, ProxyConnector, get_connector_for_proxy, API_PASSWORD,
+    TCPConnector, get_connector_for_proxy, API_PASSWORD,
     get_public_base_url,
 )
 from extractors.registry import *
@@ -30,7 +31,23 @@ from config import (
     reset_memory_profiler,
 )
 
-_SPEEDTEST_LOCK = asyncio.Lock()
+# Background speedtest job state (single run at a time; polled by the panel).
+_SPEEDTEST_STATE = {"running": False, "results": None, "error": None}
+# Background extractor-test job state (single run at a time; polled by the panel).
+_EXTRACTOR_TEST_STATE = {"running": False, "results": None, "skipped": None, "error": None}
+
+
+def _proxy_route_key(proxy_url: str):
+    """Endpoint identity for speedtest dedupe: the same tunnel entered twice
+    (e.g. global proxy socks5h://...:1081 == NordVPN socks5://...:1081) must
+    not be tested twice."""
+    parsed = urllib.parse.urlparse(proxy_url)
+    scheme = (parsed.scheme or "").lower()
+    scheme = {"socks5h": "socks5", "socks4a": "socks4"}.get(scheme, scheme)
+    host = (parsed.hostname or "").lower()
+    if host == "localhost":
+        host = "127.0.0.1"
+    return scheme, host, parsed.port
 _PROXY_ENV_KEYS = (
     "ALL_PROXY", "all_proxy",
     "HTTP_PROXY", "http_proxy",
@@ -344,6 +361,9 @@ class HLSProxyPagesMixin:
                 "/dual/aud/{hid}/audio.m3u8": "Synchronized DUAL audio playlist",
                 "/dual/aud/{hid}/init.mp4": "DUAL audio init segment",
                 "/dual/aud/{hid}/s{idx}.m4s": "DUAL audio segment",
+                "/dual/sub/{sid}/subtitles.m3u8": "DUAL audio-source subtitle playlist shifted onto the audio timeline",
+                "/dual/sub/{sid}/init.mp4": "DUAL subtitle init segment (fMP4 renditions only)",
+                "/dual/sub/{sid}/s{idx}.vtt": "DUAL subtitle segment shifted onto the audio timeline",
             },
             "usage_examples": {
                 "proxy_hls": "/proxy/hls/manifest.m3u8?d=https://example.com/stream.m3u8",
@@ -540,6 +560,38 @@ class HLSProxyPagesMixin:
                         "description": "Returns one active DUAL audio segment after applying the requested offset/rate.",
                         "parameters": [{"name": "hid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "idx", "in": "path", "required": True, "schema": {"type": "integer"}}, {"name": "o", "in": "query", "schema": {"type": "integer"}}, {"name": "r", "in": "query", "schema": {"type": "integer"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
                         "responses": {"200": {"description": "Audio segment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Audio session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sub/{sid}/subtitles.m3u8": {
+                    "get": {
+                        "summary": "Serve shifted audio-source subtitle playlist",
+                        "description": "Returns the subtitle playlist of the audio source with the DUAL offset/rate already applied to its segment timeline.",
+                        "parameters": [
+                            {"name": "sid", "in": "path", "required": True, "schema": {"type": "string"}},
+                            {"name": "o", "in": "query", "schema": {"type": "integer", "default": 0}, "description": "Offset in milliseconds."},
+                            {"name": "r", "in": "query", "schema": {"type": "integer", "default": 1000000000}, "description": "Playback rate in nano-units."},
+                            {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "Subtitle HLS playlist"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Subtitle session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sub/{sid}/init.mp4": {
+                    "get": {
+                        "summary": "Serve subtitle fragmented MP4 init",
+                        "description": "Returns the initialization fragment when the audio-source subtitles are fMP4 (wvtt) renditions.",
+                        "parameters": [{"name": "sid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "MP4 initialization fragment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Subtitle session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sub/{sid}/s{idx}.vtt": {
+                    "get": {
+                        "summary": "Serve shifted subtitle segment",
+                        "description": "Returns one subtitle segment with cue times mapped to the audio timeline by (t + offset) / rate.",
+                        "parameters": [{"name": "sid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "idx", "in": "path", "required": True, "schema": {"type": "integer"}}, {"name": "o", "in": "query", "schema": {"type": "integer"}}, {"name": "r", "in": "query", "schema": {"type": "integer"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "Subtitle segment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Subtitle session expired"}},
                         **({"security": security} if requires_password else {}),
                     }
                 },
@@ -1191,7 +1243,7 @@ class HLSProxyPagesMixin:
             # Crea una sessione dedicata con il proxy configurato
             if proxy:
                 logger.info(f"[NET] Checking IP via proxy: {proxy}")
-                connector = ProxyConnector.from_url(proxy)
+                connector = get_connector_for_proxy(proxy)
             else:
                 connector = TCPConnector()
 
@@ -1409,8 +1461,32 @@ class HLSProxyPagesMixin:
             return web.Response(status=500, text=f"Upload failed: {e}")
 
     async def handle_admin_api_speedtest(self, request):
+        """Start the speedtest as a background job.
+
+        A full run (one Ookla test per route) can take minutes; serving it in
+        one request makes gateways (Cloudflare, HF, nginx) time out and answer
+        with an HTML error page, which the panel renders as a JSON parse error.
+        """
         if not check_password(request):
             return web.Response(status=401, text="Unauthorized")
+        if _SPEEDTEST_STATE["running"]:
+            return web.json_response({"status": "running"})
+        _SPEEDTEST_STATE.update(running=True, results=None, error=None)
+        asyncio.create_task(self._run_speedtest_job())
+        return web.json_response({"status": "started"})
+
+    async def handle_admin_api_speedtest_status(self, request):
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized")
+        if _SPEEDTEST_STATE["running"]:
+            return web.json_response({"status": "running"})
+        return web.json_response({
+            "status": "done",
+            "results": _SPEEDTEST_STATE["results"] or [],
+            "error": _SPEEDTEST_STATE["error"],
+        })
+
+    async def _run_speedtest_job(self):
         try:
             routes = [{"name": "Direct", "proxy": None}]
             from config import WARP_PROXY_URL
@@ -1431,78 +1507,113 @@ class HLSProxyPagesMixin:
             global_proxies = config_store.get("global_proxies", [])
             if global_proxies:
                 routes.append({"name": "Via Proxy", "proxy": global_proxies[0]})
+            # Drop routes pointing at the same endpoint (e.g. a global proxy
+            # that is just the NordVPN/Tor/WARP socks URL entered again).
+            deduped, seen = [], set()
+            for route in routes:
+                if route["proxy"]:
+                    key = _proxy_route_key(route["proxy"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                deduped.append(route)
+            routes = deduped
             output = []
             # Run routes one at a time. Concurrent Ookla tests compete for the
             # same uplink/downlink and make the displayed comparison invalid.
-            async with _SPEEDTEST_LOCK:
-                for route in routes:
-                    try:
-                        res = await asyncio.to_thread(self._run_speedtest, route["proxy"])
-                    except Exception as exc:
-                        output.append({"name": route["name"], "error": str(exc)})
-                    else:
-                        res["name"] = route["name"]
-                        output.append(res)
-            return web.json_response({"results": output})
+            for route in routes:
+                try:
+                    res = await asyncio.to_thread(self._run_speedtest, route["proxy"])
+                except Exception as exc:
+                    output.append({"name": route["name"], "error": str(exc)})
+                else:
+                    res["name"] = route["name"]
+                    output.append(res)
+            _SPEEDTEST_STATE["results"] = output
         except Exception as e:
             logger.error(f"Speedtest failed: {e}")
-            return web.json_response({"error": str(e)}, status=500)
+            _SPEEDTEST_STATE["error"] = str(e)
+        finally:
+            _SPEEDTEST_STATE["running"] = False
 
     async def handle_admin_api_test_extractors(self, request):
+        """Start the extractor test as a background job (a full run takes minutes)."""
         if not check_password(request):
             return web.Response(status=401, text="Unauthorized")
+        if _EXTRACTOR_TEST_STATE["running"]:
+            return web.json_response({"status": "running"})
+        _EXTRACTOR_TEST_STATE.update(running=True, results=None, skipped=None, error=None)
+        asyncio.create_task(self._run_extractor_test_job(dict(request.headers)))
+        return web.json_response({"status": "started"})
+
+    async def handle_admin_api_test_extractors_status(self, request):
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized")
+        if _EXTRACTOR_TEST_STATE["running"]:
+            return web.json_response({"status": "running"})
+        return web.json_response({
+            "status": "done",
+            "results": _EXTRACTOR_TEST_STATE["results"] or [],
+            "skipped": _EXTRACTOR_TEST_STATE["skipped"] or [],
+            "error": _EXTRACTOR_TEST_STATE["error"],
+        })
+
+    async def _run_extractor_test_job(self, headers):
         from extractors.test_urls import REMOTE_TEST_URLS_URL
 
-        urls = {}
         try:
-            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
-                async with session.get(REMOTE_TEST_URLS_URL) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"gist HTTP {resp.status}")
-                    remote = await resp.json(content_type=None)
-                    if not isinstance(remote, dict):
-                        raise RuntimeError("gist JSON is not an object")
-                    urls = {
-                        k: v for k, v in remote.items()
-                        if isinstance(v, str)
-                    }
+            urls = {}
+            try:
+                async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+                    async with session.get(REMOTE_TEST_URLS_URL) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"gist HTTP {resp.status}")
+                        remote = await resp.json(content_type=None)
+                        if not isinstance(remote, dict):
+                            raise RuntimeError("gist JSON is not an object")
+                        urls = {
+                            k: v for k, v in remote.items()
+                            if isinstance(v, str)
+                        }
+            except Exception as e:
+                logger.warning("Test URL gist fetch failed: %s", e)
+                _EXTRACTOR_TEST_STATE["error"] = f"Could not load test URLs from gist: {e}"
+                return
+
+            configured = {k: u for k, u in urls.items() if u}
+            skipped = sorted(k for k, u in urls.items() if not u)
+            results = []
+            sem = asyncio.Semaphore(5)
+
+            async def _test(name, url):
+                async with sem:
+                    entry = {"extractor": name, "url": url, "ok": False}
+                    try:
+                        extractor = await self.get_extractor(url, headers, host=name)
+                        timeout = getattr(extractor, "REQUEST_TIMEOUT_TOTAL", 30)
+                        result = await asyncio.wait_for(
+                            extractor.extract(url), timeout=timeout
+                        )
+                        destination = (result or {}).get("destination_url") or ""
+                        entry["ok"] = bool(destination)
+                        entry["destination_url"] = destination
+                        if not destination:
+                            entry["error"] = "no destination_url"
+                    except asyncio.TimeoutError:
+                        entry["error"] = "timeout"
+                    except Exception as e:
+                        entry["error"] = f"{type(e).__name__}: {e}"[:300]
+                    results.append(entry)
+
+            await asyncio.gather(*(_test(k, u) for k, u in configured.items()))
+            results.sort(key=lambda r: (r["ok"], r["extractor"]))
+            _EXTRACTOR_TEST_STATE["results"] = results
+            _EXTRACTOR_TEST_STATE["skipped"] = skipped
         except Exception as e:
-            logger.warning("Test URL gist fetch failed: %s", e)
-            return web.json_response(
-                {"error": f"Could not load test URLs from gist: {e}",
-                 "results": [], "skipped": []},
-                status=502,
-            )
-
-        headers = dict(request.headers)
-        configured = {k: u for k, u in urls.items() if u}
-        skipped = sorted(k for k, u in urls.items() if not u)
-        results = []
-        sem = asyncio.Semaphore(5)
-
-        async def _test(name, url):
-            async with sem:
-                entry = {"extractor": name, "url": url, "ok": False}
-                try:
-                    extractor = await self.get_extractor(url, headers, host=name)
-                    timeout = getattr(extractor, "REQUEST_TIMEOUT_TOTAL", 30)
-                    result = await asyncio.wait_for(
-                        extractor.extract(url), timeout=timeout
-                    )
-                    destination = (result or {}).get("destination_url") or ""
-                    entry["ok"] = bool(destination)
-                    entry["destination_url"] = destination
-                    if not destination:
-                        entry["error"] = "no destination_url"
-                except asyncio.TimeoutError:
-                    entry["error"] = "timeout"
-                except Exception as e:
-                    entry["error"] = f"{type(e).__name__}: {e}"[:300]
-                results.append(entry)
-
-        await asyncio.gather(*(_test(k, u) for k, u in configured.items()))
-        results.sort(key=lambda r: (r["ok"], r["extractor"]))
-        return web.json_response({"results": results, "skipped": skipped})
+            logger.error(f"Extractor test failed: {e}")
+            _EXTRACTOR_TEST_STATE["error"] = str(e)
+        finally:
+            _EXTRACTOR_TEST_STATE["running"] = False
 
     def _ensure_speedtest_exe(self):
         import subprocess

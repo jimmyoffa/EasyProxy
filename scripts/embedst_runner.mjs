@@ -17,14 +17,37 @@ import vm from 'node:vm';
 const DEBUG = process.env.EMBEDST_DEBUG === '1' || process.argv.includes('--debug');
 function L(...a) { if (DEBUG) console.error('[embedst]', ...a); }
 
+// undici reports network failures as "fetch failed" and hides the real reason
+// (DNS, connect, TLS, proxy) in error.cause. Surface the whole chain.
+function describeError(error) {
+  const parts = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const text = typeof current === 'string' ? current : current.message || String(current);
+    const code = typeof current === 'object' ? current.code : undefined;
+    const label = code && !text.includes(code) ? `${code}: ${text}` : text;
+    if (label && !parts.includes(label)) parts.push(label);
+    current = typeof current === 'object' ? current.cause : undefined;
+  }
+  return parts.join(' <- ') || String(error);
+}
+
 let proxyDispatcher = null;
+let undiciModule = null;
+// Node's built-in fetch rejects dispatchers built by a differently-versioned
+// undici (UND_ERR_INVALID_ARG: invalid onRequestStart method), so when a proxy
+// dispatcher is active, fetch must come from the same undici module. The
+// sandbox's Request class must come from that module too, or undici.fetch
+// rejects its own inputs ("Failed to parse URL from [object Request]").
+let realFetch = globalThis.fetch.bind(globalThis);
 if (process.env.EMBEDST_PROXY && /^https?:\/\//i.test(process.env.EMBEDST_PROXY)) {
   try {
-    const { ProxyAgent } = await import('undici');
-    proxyDispatcher = new ProxyAgent(process.env.EMBEDST_PROXY);
+    const undici = await import('undici');
+    undiciModule = undici;
+    proxyDispatcher = new undici.ProxyAgent(process.env.EMBEDST_PROXY);
+    realFetch = undici.fetch.bind(undici);
   } catch (error) {
-    L('HTTP proxy unavailable:', error.message);
-    throw error;
+    console.error('[embedst] HTTP proxy unavailable, continuing direct:', describeError(error));
   }
 }
 
@@ -34,7 +57,6 @@ const u = new URL(EMBED);
 const ORIGIN = u.origin;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
 
-const realFetch = globalThis.fetch;
 const routedFetch = (url, opts = {}) => proxyDispatcher
   ? realFetch(url, { ...opts, dispatcher: proxyDispatcher })
   : realFetch(url, opts);
@@ -164,17 +186,17 @@ const ctx = {
   atob: s => Buffer.from(s, 'base64').toString('binary'),
   btoa: s => Buffer.from(s, 'binary').toString('base64'),
   fetch: fetchImpl, XMLHttpRequest: XHR, navigator, location, document, localStorage, sessionStorage,
-  // Web / fetch APIs (Node native)
-  Request: class RequestWrap extends globalThis.Request {
+  // Web / fetch APIs (Node native, or the proxying undici module when active)
+  Request: class RequestWrap extends (undiciModule ? undiciModule.Request : globalThis.Request) {
     constructor(input, init) {
       if (typeof input === 'string' && !/^[a-zA-Z]+:/.test(input)) { try { input = new RawURL(input, EMBED).href; } catch (e) {} }
       else if (input && typeof input === 'object' && typeof input.url === 'string' && !/^[a-zA-Z]+:/.test(input.url)) { try { input = new RawURL(input.url, EMBED).href; } catch (e) {} }
       super(input, init);
     }
   },
-  Response: globalThis.Response,
-  Headers: globalThis.Headers,
-  FormData: globalThis.FormData,
+  Response: undiciModule ? undiciModule.Response : globalThis.Response,
+  Headers: undiciModule ? undiciModule.Headers : globalThis.Headers,
+  FormData: undiciModule ? undiciModule.FormData : globalThis.FormData,
   AbortController: globalThis.AbortController,
   AbortSignal: globalThis.AbortSignal,
   ReadableStream: globalThis.ReadableStream,
@@ -236,7 +258,14 @@ vm.createContext(ctx);
 // vm.createContext resets the global's prototype; set it back inside the vm.
 try { vm.runInContext('Object.setPrototypeOf(globalThis, Window.prototype); Object.setPrototypeOf(document, Document.prototype);', ctx); } catch (e) { L('setproto-err', e.message); }
 
-process.on('unhandledRejection', (r) => { L('unhandled', r && r.message ? r.message : String(r)); });
+process.on('unhandledRejection', (r) => {
+  if (r && typeof r === 'object' && typeof r.status === 'number') {
+    L('unhandled response', r.status, r.url);
+  } else {
+    L('unhandled', r && r.message ? r.message : String(r));
+  }
+  if (DEBUG && r && r.stack) L(r.stack);
+});
 
 // ---------------------------------------------------------------------------
 // Fetch bundle-jw.js, extract the appended program (the Function() body)
@@ -274,6 +303,7 @@ function extractProgram(bundle) {
 const optsObj = '{get define(){return typeof define!=="undefined"?define:undefined},get module(){return typeof module!=="undefined"?module:undefined},get angular(){return typeof angular!=="undefined"?angular:undefined},get global(){return globalThis},get F6P7kK(){return typeof exports!=="undefined"?exports:undefined},get TW8AKss(){return typeof define},get G7Q5ExK(){return typeof module},get kzlLPB(){return typeof angular},get Uy7o_GN(){return typeof exports}}';
 
 let finished = false;
+let runError = null;
 function finish() {
   if (finished) return;
   finished = true;
@@ -282,7 +312,10 @@ function finish() {
     process.stdout.write(JSON.stringify(out));
     process.exit(0);
   } else {
-    process.stdout.write(JSON.stringify({ error: 'no m3u8 captured' }));
+    // Report the real failure (bundle/wasm fetch) instead of masking it as
+    // "no m3u8 captured", which the Python side shows verbatim.
+    const error = runError ? describeError(runError) : 'no m3u8 captured';
+    process.stdout.write(JSON.stringify({ error }));
     process.exit(1);
   }
 }
@@ -313,6 +346,7 @@ function finish() {
       }
     });
   } catch (e) {
+    runError = e;
     L('RUN-ERR', e && e.message);
   }
   // Wait a bit for async wasm continuation to fire the m3u8 fetch.

@@ -180,6 +180,33 @@ def _master_entries(text: str, base_url: str) -> tuple[list[dict], list[dict]]:
     return variants, audios
 
 
+def _subtitle_entries(text: str, base_url: str, limit: int = 12) -> list[dict]:
+    """Collect #EXT-X-MEDIA TYPE=SUBTITLES renditions from a master playlist."""
+    entries: list[dict] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("#EXT-X-MEDIA:"):
+            continue
+        attributes = _attrs(line.split(":", 1)[1])
+        if attributes.get("TYPE", "").upper() != "SUBTITLES":
+            continue
+        uri = attributes.get("URI")
+        if not uri:
+            continue
+        if len(entries) >= limit:
+            break
+        language = attributes.get("LANGUAGE") or attributes.get("NAME") or ""
+        entries.append({
+            "url": urljoin(base_url, uri),
+            "language": language,
+            "name": attributes.get("NAME") or language,
+            "default": attributes.get("DEFAULT", "NO").strip().upper() == "YES",
+            "autoselect": attributes.get("AUTOSELECT", "YES").strip().upper() != "NO",
+            "forced": attributes.get("FORCED", "NO").strip().upper() == "YES",
+        })
+    return entries
+
+
 def _language_match(item: dict, wanted: str) -> bool:
     values = {
         str(item.get("LANGUAGE") or "").lower(),
@@ -568,6 +595,57 @@ class HLSProxyDualMixin:
             dual_service.audio.pin(hid)
         return prepared
 
+    async def _register_dual_subtitle(
+        self,
+        request,
+        source: dict,
+        entry: dict,
+        token: str,
+    ) -> dict | None:
+        """Register one audio-source subtitle so it can follow the audio shift."""
+        label = entry.get("name") or entry.get("language") or "subtitle"
+        try:
+            media = dict(source, url=entry["url"], manifest="")
+            playlist, playlist_base = await self._manifest(media)
+            if "#EXTINF" not in playlist:
+                return None
+            key_uri = self._audio_key(playlist)
+            key_bytes = b""
+            if key_uri:
+                key_source = dict(media)
+                key_source["url"] = urljoin(playlist_base, key_uri)
+                key_bytes, _ = await self._fetch_dual(key_source, binary=True)
+                if len(key_bytes) != 16:
+                    raise DualLinksError(400, "subtitle AES key must be 16 bytes")
+            prepared = await self._dual_json(
+                request,
+                "POST",
+                "/dual/asub",
+                {
+                    "token": token,
+                    "playlist": playlist,
+                    "key": base64.b64encode(key_bytes).decode(),
+                    "baseUrl": playlist_base,
+                    "language": entry.get("language") or "",
+                    "name": entry.get("name") or "",
+                    "headers": source.get("headers") or {},
+                    "warp_off": bool(source.get("warp_off")),
+                    "proxy_off": bool(source.get("proxy_off")),
+                    "proxy_url": source.get("forced_proxy") or "",
+                    "extractor_name": source.get("extractor_name") or "",
+                },
+            )
+        except (DualLinksError, dual_service.DualServiceError, asyncio.TimeoutError) as exc:
+            logger.warning("[DUAL] audio subtitle '%s' skipped: %s", label, exc)
+            return None
+        except Exception as exc:
+            logger.warning("[DUAL] audio subtitle '%s' failed: %r", label, exc)
+            return None
+        sid = str(prepared.get("sid") or "")
+        if not sid:
+            return None
+        return {**entry, "source": "audio", "sid": sid}
+
     async def _dual_json(self, request, method: str, path: str, body: dict | None = None) -> dict:
         if method != "POST":
             raise DualLinksError(500, "unsupported internal DUAL method")
@@ -576,6 +654,8 @@ class HLSProxyDualMixin:
                 return await dual_service.create_session_data()
             if path == "/dual/aprep":
                 return await dual_service.prepare_audio_data(body or {}, request)
+            if path == "/dual/asub":
+                return await dual_service.prepare_subtitle_data(body or {}, request)
             if path == "/sync":
                 return await dual_service.sync_audio_data(body or {}, request)
             raise DualLinksError(500, f"unsupported internal DUAL path: {path}")
@@ -659,14 +739,38 @@ class HLSProxyDualMixin:
         audio_url = str(result["audio_url"]).replace('"', "%22")
         video_url = str(result["video_url"]).replace('"', "%22")
         codecs = str(result.get("video_codecs") or "avc1.640028,mp4a.40.2").replace('"', "")
-        return "\n".join([
+        lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:7",
             f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="dual-audio",LANGUAGE="{language}",NAME="{name}",DEFAULT=YES,AUTOSELECT=YES,URI="{audio_url}"',
-            f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={width}x{resolution},CODECS="{codecs}",AUDIO="dual-audio"',
+        ]
+        groups: list[str] = []
+        for group_id, source in (("dual-subs-video", "video"), ("dual-subs-audio", "audio")):
+            items = [
+                item for item in (result.get("subtitles") or [])
+                if item.get("source") == source and item.get("url")
+            ]
+            if not items:
+                continue
+            groups.append(group_id)
+            for item in items:
+                subtitle_name = str(item.get("name") or item.get("language") or group_id).replace('"', "'")
+                subtitle_language = str(item.get("language") or "").replace('"', "'")
+                uri = str(item["url"]).replace('"', "%22")
+                default = "YES" if item.get("default") else "NO"
+                autoselect = "YES" if item.get("autoselect", True) else "NO"
+                forced = ",FORCED=YES" if item.get("forced") else ""
+                lines.append(
+                    f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="{group_id}",LANGUAGE="{subtitle_language}",'
+                    f'NAME="{subtitle_name}",DEFAULT={default},AUTOSELECT={autoselect}{forced},URI="{uri}"'
+                )
+        subtitles_attr = f',SUBTITLES="{",".join(groups)}"' if groups else ""
+        lines += [
+            f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={width}x{resolution},CODECS="{codecs}",AUDIO="dual-audio"{subtitles_attr}',
             video_url,
             "",
-        ])
+        ]
+        return "\n".join(lines)
 
     @staticmethod
     def _video_codecs(text: str, base_url: str, video_url: str) -> str:
@@ -743,6 +847,15 @@ class HLSProxyDualMixin:
             requested_audio_lang,
             bypass_audio_language,
         )
+        # Video-source subtitles stay on the original video timeline, so the
+        # plain proxy is enough. Audio-source subtitles follow the shifted
+        # audio and are registered below.
+        video_subtitle_entries = _subtitle_entries(video_text, video_base)
+        video_subtitle_urls = {entry["url"] for entry in video_subtitle_entries}
+        audio_subtitle_entries = [
+            entry for entry in _subtitle_entries(audio_text, audio_base)
+            if entry["url"] not in video_subtitle_urls
+        ]
         audio_media = dict(audio)
         audio_media["url"] = selected_audio_url
         audio_media["manifest"] = ""
@@ -836,6 +949,14 @@ class HLSProxyDualMixin:
                 audio_lang,
             )
         )
+        # Subtitle registration only needs the session token and the audio
+        # source, so it runs while the (slow) sync is still working.
+        subtitle_tasks = [
+            asyncio.create_task(
+                self._register_dual_subtitle(request, audio, entry, token)
+            )
+            for entry in audio_subtitle_entries
+        ]
 
         audio_hid = ""
         synced = cached_sync
@@ -926,6 +1047,24 @@ class HLSProxyDualMixin:
         if status != "ok":
             detail = synced.get("message") or synced.get("detail") or "DUAL sync failed"
             raise DualLinksError(409, str(detail))
+        subtitle_items = [
+            {
+                **entry,
+                "source": "video",
+                "url": self._dual_video_proxy_url(request, entry["url"], video),
+            }
+            for entry in video_subtitle_entries
+        ]
+        for prepared_subtitle in await asyncio.gather(*subtitle_tasks):
+            if not prepared_subtitle:
+                continue
+            subtitle_items.append({
+                **prepared_subtitle,
+                "url": self._audio_url_with_sync(
+                    dual_service._subtitle_url(request, prepared_subtitle["sid"], token),
+                    synced,
+                ),
+            })
         result = {
             "status": status,
             "audio_lang": audio_lang,
@@ -933,6 +1072,7 @@ class HLSProxyDualMixin:
             "audio_hls_language": audio_meta.get("hls_language") or audio_lang,
             "resolution": resolution,
             "video_url": video_url,
+            "subtitles": subtitle_items,
             "reference_audio_url": (
                 reference_audio_url
                 if synced.get("reference_matches_video", True)
