@@ -516,16 +516,37 @@ class DLStreamsExtractor(BaseExtractor):
         def _timeout(default: float) -> float:
             return max(1.0, min(default, _remaining()))
 
+        async def _fetch_html(target: str, hdrs: dict, what: str) -> str | None:
+            # Hard event-loop-level cap for small HTML page fetches. The
+            # per-request aiohttp timeout did not stop a pathological ~60s
+            # stall (connector-level hang outside timeout coverage) that
+            # starved manifest refresh while polls piled up waiting for the
+            # in-flight extraction. Raises asyncio.TimeoutError on breach;
+            # returns None on non-200. Deep stream validation is NOT capped
+            # here (it legitimately downloads multi-MB segments).
+            async def _do() -> str | None:
+                async with session.get(target, headers=hdrs, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
+                    if resp.status != 200:
+                        logger.debug("DLStreams: %s %s returned status %s", what, target, resp.status)
+                        if resp.status == 429:
+                            self._mark_host_limited(target, resp.headers.get("Retry-After"))
+                        return None
+                    return await resp.text()
+            try:
+                return await asyncio.wait_for(_do(), timeout=self.CANDIDATE_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "DLStreams: %s %s exceeded %ss, skipping",
+                    what, target, self.CANDIDATE_TIMEOUT_SECONDS,
+                )
+                raise
+
         watch_html = ""
         if urlparse(url).path == "/watch.php" and not self._host_limited_for(url):
             try:
-                async with session.get(
-                    url, headers=self.base_headers, timeout=_timeout(3)
-                ) as resp:
-                    if resp.status == 200:
-                        watch_html = await resp.text()
-                    elif resp.status == 429:
-                        self._mark_host_limited(url, resp.headers.get("Retry-After"))
+                # Same hard cap as candidate/iframe pages: the upstream 3s
+                # aiohttp timeout alone does not cover connector-level hangs.
+                watch_html = await _fetch_html(url, dict(self.base_headers), "watch page") or ""
             except Exception as exc:
                 logger.debug("DLStreams: default player unavailable: %s", exc)
         player_urls = self._prioritize_player_urls(
@@ -557,13 +578,9 @@ class DLStreamsExtractor(BaseExtractor):
                 }
                 
                 logger.debug("DLStreams: GET stream page %s", candidate)
-                async with session.get(candidate, headers=headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
-                    if resp.status != 200:
-                        logger.debug("DLStreams: candidate %s returned status %s", candidate, resp.status)
-                        if resp.status == 429:
-                            self._mark_host_limited(candidate, resp.headers.get("Retry-After"))
-                        continue
-                    html = await resp.text()
+                html = await _fetch_html(candidate, headers, "stream page")
+                if html is None:
+                    continue
                 
                 # Extract player iframe src (support absolute, protocol-relative and relative URLs)
                 iframe_src = None
@@ -612,13 +629,9 @@ class DLStreamsExtractor(BaseExtractor):
                 iframe_headers["Referer"] = candidate
                 iframe_headers["Origin"] = self.entry_origin
                 
-                async with session.get(iframe_src, headers=iframe_headers, timeout=_timeout(self.CANDIDATE_TIMEOUT_SECONDS)) as resp:
-                    if resp.status != 200:
-                        logger.debug("DLStreams: iframe %s returned status %s", iframe_src, resp.status)
-                        if resp.status == 429:
-                            self._mark_host_limited(iframe_src, resp.headers.get("Retry-After"))
-                        continue
-                    iframe_html = await resp.text()
+                iframe_html = await _fetch_html(iframe_src, iframe_headers, "iframe page")
+                if iframe_html is None:
+                    continue
                 
                 # Extract stream URL from iframe HTML.
                 # Supported formats:
