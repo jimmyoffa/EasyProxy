@@ -1339,7 +1339,11 @@ class HLSProxyCoreMixin:
             return entry[1]
         stream_key = f"{source_key}-{secrets.token_hex(6)}"
         cache[cache_key] = (now, stream_key)
-        while len(cache) > 512:
+        # Players with live previews poll hundreds of channels at once, each minting
+        # an entry: with a small cap the active channel under watch gets evicted
+        # within seconds and every poll mints a new key (plus a new upstream
+        # session). Entries are ~100 bytes, so a generous cap is free.
+        while len(cache) > 4096:
             oldest = min(cache, key=lambda key: cache[key][0])
             cache.pop(oldest, None)
         return stream_key
