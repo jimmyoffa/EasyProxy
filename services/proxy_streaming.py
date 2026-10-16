@@ -205,8 +205,8 @@ class HLSProxyStreamingMixin:
             )
 
         except Exception as e:
-            logger.error(
-                "Error in .ts segment proxy: %s [%s]",
+            logger.warning(
+                "⚠️ .ts segment proxy hiccup: %s [%s]",
                 e,
                 request_log_context(
                     request,
@@ -719,8 +719,8 @@ class HLSProxyStreamingMixin:
                     return response
                 except Exception as e:
                     if "Connection lost" not in str(e) and "closing transport" not in str(e):
-                        logger.error(
-                            "Error streaming segment %s: %s [%s]",
+                        logger.warning(
+                            "⚠️ Segment %s relay hiccup: %s [%s]",
                             segment_name,
                             e,
                             log_context(session_proxy or forced_proxy),
@@ -733,8 +733,8 @@ class HLSProxyStreamingMixin:
                     await session.close()
 
         except Exception as e:
-            logger.error(
-                "Error in segment proxy: %s [%s]",
+            logger.warning(
+                "⚠️ Segment proxy hiccup: %s [%s]",
                 e,
                 request_log_context(request, segment_url, route=safe_log_route(forced_proxy)),
             )
@@ -1101,8 +1101,8 @@ class HLSProxyStreamingMixin:
                         curl_s = None
                         goto_manifest_processing = True
                 except Exception as e:
-                    logger.error(
-                        "❌ [curl_cffi] Error: %s [%s]",
+                    logger.warning(
+                        "⚠️ [curl_cffi] failed: %s [%s]",
                         e,
                         log_context(session_proxy),
                     )
@@ -1353,7 +1353,7 @@ class HLSProxyStreamingMixin:
                             headers={"Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*", "Retry-After": "5", "Cache-Control": "no-cache"},
                         )
                     logger.warning(
-                        "⚠️ Upstream returned error %s [%s]",
+                        "⚠️ Upstream answered %s [%s]",
                         resp.status,
                         log_context(routing),
                     )
@@ -1477,8 +1477,8 @@ class HLSProxyStreamingMixin:
                         return response
                     except Exception as e:
                         if "Connection lost" not in str(e) and "closing transport" not in str(e):
-                            logger.error(
-                                "❌ Stream error [%s]: %r [%s]",
+                            logger.warning(
+                                "⚠️ Stream relay hiccup [%s]: %r [%s]",
                                 type(e).__name__,
                                 e,
                                 log_context(session_proxy or forced_proxy),
@@ -1939,8 +1939,8 @@ class HLSProxyStreamingMixin:
                         log_context(forced_proxy),
                     )
 
-            logger.error(
-                "❌ Generic error in stream proxy [%s]: %r [%s]",
+            logger.warning(
+                "⚠️ Stream proxy hiccup [%s]: %r [%s]",
                 type(e).__name__,
                 e,
                 log_context(getattr(request, "_ps_forced_proxy", None)),

@@ -182,8 +182,8 @@ class BaseExtractor:
                 # intermediate failures quiet: a later retry may succeed.
                 status = getattr(e, 'status', None)
                 if attempt >= retries - 1:
-                    logger.error(
-                        "[%s] Request failed after %s attempts for %s: %s",
+                    logger.warning(
+                        "[%s] Request still failing after %s attempts for %s: %s",
                         self.extractor_name,
                         retries,
                         url,

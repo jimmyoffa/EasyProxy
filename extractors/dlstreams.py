@@ -590,7 +590,7 @@ class DLStreamsExtractor(BaseExtractor):
                         if iframe_el:
                             iframe_src = iframe_el.get("src")
                     except Exception as e:
-                        logger.debug("DLStreams: bs4 parsing error: %s", e)
+                        logger.debug("DLStreams: bs4 parsing hiccup: %s", e)
                 
                 if not iframe_src:
                     match = re.search(r'<iframe\s+[^>]*src=["\']([^"\']+)["\']', html, re.I)
@@ -884,7 +884,7 @@ class DLStreamsExtractor(BaseExtractor):
         except ExtractorError:
             raise
         except Exception as e:
-            logger.debug("DLStreams internal extraction error for %s: %s", url, e, exc_info=True)
+            logger.debug("DLStreams internal extraction hiccup for %s: %s", url, e, exc_info=True)
             raise ExtractorError(f"DLStreams extraction failed: {str(e)}") from None
 
     async def close(self):
