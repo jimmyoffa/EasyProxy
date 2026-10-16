@@ -1335,6 +1335,23 @@ class HLSProxyStreamingMixin:
 
                     error_body = await resp.content.read(4096) or b""
                     routing = safe_log_route(session_proxy or forced_proxy)
+                    # A manifest 404/empty kills player sessions for good even
+                    # when upstream recovers a minute later (seen on 868: P1+P2
+                    # 404 ~60s, AptvPlayer stayed black after recovery while
+                    # the browser rode through). Mask transient manifest errors
+                    # as 503+Retry-After so the player keeps its buffer and
+                    # retries instead of tearing the session down.
+                    if ("manifest.m3u8" in request.path or "playlist" in request.path) and resp.status in (403, 404, 408, 429, 500, 502, 503, 504):
+                        logger.warning(
+                            "⚠️ Upstream manifest %s → 503 (session keep-alive) [%s]",
+                            resp.status,
+                            log_context(routing),
+                        )
+                        return web.Response(
+                            text="Upstream playlist temporarily unavailable, retrying",
+                            status=503,
+                            headers={"Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*", "Retry-After": "5", "Cache-Control": "no-cache"},
+                        )
                     logger.warning(
                         "⚠️ Upstream returned error %s [%s]",
                         resp.status,
