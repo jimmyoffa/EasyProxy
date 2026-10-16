@@ -739,10 +739,6 @@
 
     <div class="container">
         <div class="nav-bar fade-in visible">
-            <a href="/" class="back-link">
-                <span>←</span>
-                <span>Back to Home</span>
-            </a>
             <div class="version-info-row">
                 <div class="version-chip">
                     <span>v{{APP_VERSION}}</span>
@@ -1045,14 +1041,15 @@
             }
 
             buildPlaylistUrl() {
-                const hasMpd = this.urls.some(p => p.url.toLowerCase().includes('.mpd'));
-                if (hasMpd) {
+                const allMpd = this.urls.length > 0 && this.urls.every(p => p.url.toLowerCase().includes('.mpd'));
+                if (allMpd) {
                     const base = window.location.origin;
                     const parts = this.urls.map(p => {
                         let rawUrl = p.url;
                         let extraParams = '';
                         if (p.warp) extraParams += '&warp=off';
-                        if (p.proxy && p.proxy !== 'auto') extraParams += '&proxy=' + encodeURIComponent(p.proxy);
+                        if (p.noProxy) extraParams += '&proxy=off';
+                        else if (p.proxy && p.proxy !== 'auto') extraParams += '&proxy=' + encodeURIComponent(p.proxy);
                         const pw = this.elements.apiPassword.value.trim();
                         if (pw) extraParams += `&api_password=${encodeURIComponent(pw)}`;
                         const ck = rawUrl.match(/[?&]clearkey=([^&]+)/i);
@@ -1063,7 +1060,8 @@
                         }
                         const hasQ = rawUrl.includes('?') && rawUrl.split('?')[1].trim();
                         const cleanUrl = hasQ ? rawUrl : rawUrl.replace(/\?$/, '');
-                        return `${base}/proxy/mpd/manifest.m3u8?d=${encodeURIComponent(cleanUrl)}${extraParams}`;
+                        const mpdEndpoint = p.nativeMpd ? '/proxy/mpd/manifest.mpd' : '/proxy/mpd/manifest.m3u8';
+                        return `${base}${mpdEndpoint}?d=${encodeURIComponent(cleanUrl)}${extraParams}`;
                     });
                     return parts.join('\n');
                 }
@@ -1093,8 +1091,7 @@
             async             generate() {
                 if (this.urls.length === 0) return;
                 const url = this.buildPlaylistUrl();
-                const hasMpd = this.urls.some(p => p.url.toLowerCase().includes('.mpd'));
-                if (hasMpd) {
+                if (url.includes('\n')) {
                     this.elements.resultUrl.innerHTML = url.replace(/\n/g, '<br>');
                 } else {
                     this.elements.resultUrl.textContent = url;
@@ -1144,6 +1141,6 @@
         new PlaylistBuilder();
     </script>
 
-<script src="/static/ep-nav.js"></script>
+<script src="/static/ep-nav.js?v={{APP_VERSION}}"></script>
 </body>
 </html>

@@ -425,7 +425,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         # (evita di provare a estrarre un .mp4 come se fosse una pagina HTML)
         path_lower = url.split('?')[0].lower()
         if any(path_lower.endswith(ext) for ext in [".mp4", ".m3u8", ".ts", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".mp3", ".aac", ".m4a", ".mpd"]):
-            key = "hls_generic"
+            key = _cache_key("hls_generic", bypass_warp)
             if key not in self.extractors:
                 self.extractors[key] = GenericHLSExtractor(request_headers, proxies=_build_proxy_list(None, "generic"))
             return self.extractors[key]
@@ -872,6 +872,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 self.extractors[key] = Fctv33Extractor(
                     request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
+            return self.extractors[key]
         elif "livetv.sx" in url.lower() or "livetv" in url.lower():
             key = _cache_key("livetv", bypass_warp)
             proxy = get_proxy_for_url("livetv.sx", bypass_warp=bypass_warp)
@@ -884,7 +885,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         else:
             # ✅ MODIFICATO: Fallback al GenericHLSExtractor per qualsiasi altro URL.
             # Questo permette di gestire estensioni sconosciute o URL senza estensione.
-            key = "hls_generic"
+            key = _cache_key("hls_generic", bypass_warp)
             if key not in self.extractors:
                 self.extractors[key] = GenericHLSExtractor(
                     request_headers, proxies=_build_proxy_list(None, "generic")

@@ -487,7 +487,7 @@
                 <label>Enabled</label>
                 <div id="warp-toggle" class="toggle" onclick="toggleWarp()"></div>
                 <span id="warp-label" class="badge badge-off">OFF</span>
-                <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="reconnectWarp()">🔄 New IP</button>
+                <button id="warp-reconnect-btn" class="btn btn-primary btn-sm" style="margin-left:auto" onclick="reconnectWarp()">🔄 New IP</button>
             </div>
             <div class="row">
                 <label>License Key</label>
@@ -694,7 +694,7 @@ function renderSpeedtestResults(data) {
             }
             return '<div class="speedtest-card">' +
                 '<div style="font-weight:600;font-size:0.8rem;margin-bottom:4px">' + r.name + '</div>' +
-                (r.proxy_used ? '<div style="font-size:0.65rem;color:var(--accent-orange);margin-bottom:2px">📡 ' + r.proxy_used + '</div>' : '') +
+                (r.proxy_used ? '<div style="font-size:0.65rem;color:var(--accent-warning);margin-bottom:2px">📡 ' + r.proxy_used + '</div>' : '') +
                 (r.external_ip ? '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">Exit IP: ' + r.external_ip + '</div>' : '') +
                 '<div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:4px">' + (r.server.sponsor && r.server.sponsor !== 'Unknown' ? r.server.sponsor + ' · ' : '') + r.server.location + '</div>' +
                 '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.75rem"><span style="color:var(--text-muted)">Ping</span><span style="color:var(--accent-primary)">' + r.ping_ms + ' ms</span></div>' +
@@ -704,12 +704,18 @@ function renderSpeedtestResults(data) {
     }).join('') + '</div>';
 }
 
+function withAdminQuery(path) {
+    const pw = new URLSearchParams(window.location.search).get('api_password');
+    return path + (pw ? '?api_password=' + encodeURIComponent(pw) : '');
+}
+
 async function pollAdminJob(url, resultEl, busyText) {
     const deadline = Date.now() + 15 * 60 * 1000;
     let data = null;
+    const authUrl = withAdminQuery(url);
     while (Date.now() < deadline) {
         await new Promise(function(r) { setTimeout(r, 2000); });
-        const resp = await fetch(url);
+        const resp = await fetch(authUrl);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         data = await resp.json();
         if (data.status !== 'running') break;
@@ -728,7 +734,7 @@ async function runAllSpeedtests() {
     result.style.display = 'block';
     result.innerHTML = 'Running speed tests...';
     try {
-        await fetch('/api/admin/speedtest', { method: 'POST' });
+        await fetch(withAdminQuery('/api/admin/speedtest'), { method: 'POST' });
         renderSpeedtestResults(await pollAdminJob('/api/admin/speedtest', result, 'Running speed tests... (can take a few minutes)'));
     } catch (e) {
         result.innerHTML = 'Error: ' + e.message;
@@ -743,7 +749,7 @@ async function initSpeedtest() {
     const btn = document.getElementById('speedtest-btn');
     const result = document.getElementById('speedtest-result');
     try {
-        const resp = await fetch('/api/admin/speedtest');
+        const resp = await fetch(withAdminQuery('/api/admin/speedtest'));
         if (!resp.ok) return;
         const data = await resp.json();
         if (data.status === 'running') {
@@ -793,7 +799,7 @@ async function runExtractorTests() {
     result.style.display = 'block';
     result.innerHTML = 'Running extractor tests...';
     try {
-        await fetch('/api/admin/extractors/test', { method: 'POST' });
+        await fetch(withAdminQuery('/api/admin/extractors/test'), { method: 'POST' });
         renderExtractorResults(await pollAdminJob('/api/admin/extractors/test', result, 'Testing extractors... (can take a few minutes)'));
     } catch (e) {
         result.innerHTML = 'Error: ' + e.message;
@@ -808,7 +814,7 @@ async function initExtractorTests() {
     const btn = document.getElementById('extractors-test-btn');
     const result = document.getElementById('extractors-test-result');
     try {
-        const resp = await fetch('/api/admin/extractors/test');
+        const resp = await fetch(withAdminQuery('/api/admin/extractors/test'));
         if (!resp.ok) return;
         const data = await resp.json();
         if (data.status === 'running') {
@@ -1084,10 +1090,10 @@ function toggleExtractorProxyMode() {
 async function reconnectWarp() {
     const params = new URLSearchParams(window.location.search);
     const pw = params.get('api_password');
-    const btn = document.querySelector('#warp-status + .row .btn-primary');
+    const btn = document.getElementById('warp-reconnect-btn') || document.querySelector('#warp-status + .row .btn-primary');
     if (btn) { btn.textContent = '⏳ Reconnecting...'; btn.disabled = true; }
     try {
-        const resp = await fetch('/api/admin/warp/reconnect' + (pw ? '?api_password=' + pw : ''), {
+        const resp = await fetch('/api/admin/warp/reconnect' + (pw ? '?api_password=' + encodeURIComponent(pw) : ''), {
             method: 'POST'
         });
         const data = await resp.json();
@@ -1097,11 +1103,11 @@ async function reconnectWarp() {
         } else {
             toast(data.message || 'Reconnect failed', 'error');
         }
-        if (btn) { btn.textContent = '🔄 New IP'; btn.disabled = false; }
     } catch(e) {
         toast('Reconnect error: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.textContent = '🔄 New IP'; btn.disabled = false; }
     }
-    if (btn) { btn.textContent = '🔄 Reconnect WARP (new IP)'; btn.disabled = false; }
 }
 
 function logout() {
@@ -1265,14 +1271,26 @@ async function updateExtractorProxy(name, value) {
     const entry = extractorProxies[name];
     const isFile = entry && entry.file;
     const type = isFile ? 'file' : 'proxy';
+    const trimmed = (value || '').trim();
     const params = new URLSearchParams(window.location.search);
     const pw = params.get('api_password');
     const resp = await fetch('/api/admin/extractor/proxy' + (pw ? '?api_password=' + pw : ''), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({extractor: name, proxy: value, type: type})
+        body: JSON.stringify({extractor: name, proxy: trimmed, type: type})
     });
-    if (resp.ok) toast('Updated proxy for ' + name);
-    else toast('Failed to update', 'error');
+    if (resp.ok) {
+        if (!trimmed) {
+            delete extractorProxies[name];
+            renderExtractorProxies();
+            populateExtractorSelect(config.available_extractors || []);
+            toast('Removed proxy for ' + name);
+        } else {
+            extractorProxies[name] = isFile ? {file: trimmed} : trimmed;
+            toast('Updated proxy for ' + name);
+        }
+    } else {
+        toast('Failed to update', 'error');
+    }
 }
 
 async function removeExtractorProxy(name) {
@@ -1474,6 +1492,6 @@ setInterval(async () => {
     }
 }, 5000);
 </script>
-<script src="/static/ep-nav.js"></script>
+<script src="/static/ep-nav.js?v={{APP_VERSION}}"></script>
 </body>
 </html>

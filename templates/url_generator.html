@@ -576,11 +576,6 @@
     <div class="bg-glow"></div>
 
     <div class="container">
-        <a href="/" class="back-link">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-            Back to Home
-        </a>
-
         <h1 class="page-title">URL Generator</h1>
         <p class="page-subtitle">Generate proxy URLs, extractor links, and batch requests compatible with EasyProxy.</p>
 
@@ -683,7 +678,7 @@
                     <div style="display:grid;gap:10px;grid-template-columns:minmax(0,1fr) 200px;">
                         <input id="extractorHost" type="text" placeholder="Custom or selected host">
                         <select id="extractorHostSelect">
-                            <option value="">Select host</option>
+                            <option value="" selected>Select host</option>
                             <option value="vixcloud">VixCloud</option>
                             <option value="voe">VOE</option>
                             <option value="mixdrop">MixDrop</option>
@@ -1012,9 +1007,9 @@
 
         // Extractor host select -> input
         document.getElementById('extractorHostSelect').addEventListener('change', (e) => {
-            if (e.target.value) {
-                document.getElementById('extractorHost').value = e.target.value;
-            }
+            const hostInput = document.getElementById('extractorHost');
+            hostInput.value = e.target.value;
+            hostInput.dispatchEvent(new Event('input', { bubbles: true }));
         });
 
         function copyExtractorList(targetId) {
@@ -1033,8 +1028,9 @@
             ['dualAudioExtractorSelect', 'dualAudioExtractor']
         ].forEach(([selectId, inputId]) => {
             document.getElementById(selectId).addEventListener('change', (event) => {
-                document.getElementById(inputId).value = event.target.value;
-                autoDual();
+                const targetInput = document.getElementById(inputId);
+                targetInput.value = event.target.value;
+                targetInput.dispatchEvent(new Event('input', { bubbles: true }));
             });
         });
 
@@ -1126,7 +1122,7 @@
 
                 const data = JSON.parse(text);
                 let urls = data.urls || [];
-                if (redirectStream || bypassWarp || proxyMode || disableSSL || maxRes) {
+                if (redirectStream || bypassWarp || proxyMode || disableSSL || maxRes || apiPassword) {
                     urls = urls.map(u => {
                         const urlObj = new URL(u);
                         if (redirectStream) urlObj.searchParams.set('redirect_stream', 'true');
@@ -1134,6 +1130,7 @@
                         if (proxyMode) urlObj.searchParams.set('proxy', proxyMode);
                         if (disableSSL) urlObj.searchParams.set('disable_ssl', '1');
                         if (maxRes) urlObj.searchParams.set('max_res', 'true');
+                        if (apiPassword) urlObj.searchParams.set('api_password', apiPassword);
                         return urlObj.toString();
                     });
                 }
@@ -1274,6 +1271,17 @@
                 try {
                     const data = JSON.parse(text);
                     if (data.urls) {
+                        const reqUrls = Array.isArray(payload.urls) ? payload.urls : [];
+                        data.urls = data.urls.map((u, i) => {
+                            const item = reqUrls[i] || {};
+                            const urlObj = new URL(u);
+                            if (item.disable_ssl === true || item.disable_ssl === 1 || item.disable_ssl === '1' || item.disable_ssl === 'true') {
+                                urlObj.searchParams.set('disable_ssl', '1');
+                            }
+                            if (apiPassword) urlObj.searchParams.set('api_password', apiPassword);
+                            return urlObj.toString();
+                        });
+                        result.value = JSON.stringify(data);
                         renderUrlList('batchUrlList', data.urls);
                     } else {
                         document.getElementById('batchUrlList').innerHTML = '';
@@ -1299,14 +1307,20 @@
         }
 
         const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyMode', 'proxyDisableSSL', 'proxyNativeMpd', 'proxyMaxRes'];
-        const extractorInputs = ['extractorHost', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorProxyMode', 'extractorDisableSSL', 'extractorMaxRes'];
+        const extractorInputs = ['extractorHost', 'extractorHostSelect', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorProxyMode', 'extractorDisableSSL', 'extractorMaxRes'];
 
         function sortSelectOptions(selectId) {
             const select = document.getElementById(selectId);
             if (!select || select.options.length < 3) return;
+            const currentVal = select.value;
             const [placeholder, ...options] = Array.from(select.options);
             options.sort((a, b) => a.textContent.trim().localeCompare(b.textContent.trim()));
             select.replaceChildren(placeholder, ...options);
+            if (currentVal) {
+                select.value = currentVal;
+            } else {
+                select.selectedIndex = 0;
+            }
         }
 
         ['extractorHostSelect', 'dualVideoExtractorSelect', 'dualAudioExtractorSelect'].forEach(sortSelectOptions);
@@ -1509,6 +1523,6 @@
                 </div>
             </div>
         </div>
-<script src="/static/ep-nav.js"></script>
+<script src="/static/ep-nav.js?v={{APP_VERSION}}"></script>
 </body>
 </html>

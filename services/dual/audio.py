@@ -396,7 +396,13 @@ class AudioStore:
                 command += ["-ss", f"{item['trim']:.6f}"]
             command += ["-c:a", "copy", "-bsf:a", "aac_adtstoasc", "-f", "hls", "-hls_time", "99999", "-hls_playlist_type", "vod", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", "f%d.m4s", "-hls_list_size", "0", "-y", "output.m3u8"]
             process = await asyncio.create_subprocess_exec(*command, cwd=work, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            _, error = await asyncio.wait_for(process.communicate(), timeout=60)
+            try:
+                _, error = await asyncio.wait_for(process.communicate(), timeout=60)
+            except BaseException:
+                if process.returncode is None:
+                    process.kill()
+                    await process.communicate()
+                raise
             made = work / "f0.m4s"
             if process.returncode or not made.exists():
                 raise RuntimeError((error.decode(errors="replace") or "ffmpeg failed")[:300])

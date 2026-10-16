@@ -104,6 +104,8 @@ class MPDToHLSConverter:
                 'duration': duration,
             }
             self._live_sequence_clocks[key] = clock
+            while len(self._live_sequence_clocks) > 512:
+                self._live_sequence_clocks.pop(next(iter(self._live_sequence_clocks)))
         else:
             # A source restart can move its media timeline backwards. Do not
             # let an old playback's origin produce negative/huge sequences.
@@ -733,9 +735,9 @@ class MPDToHLSConverter:
                         if r < 0:
                             next_time = next((int(item.get('t')) for item in timeline_entries[entry_index + 1:] if item.get('t') is not None), None)
                             if next_time is None:
-                                period = next(p for p in root.findall('mpd:Period', self.ns) if adaptation_set in list(p))
-                                period_start = self._duration_seconds(period.get('start', 'PT0S'))
-                                if period.get('duration'):
+                                period = next((p for p in root.findall('mpd:Period', self.ns) if adaptation_set in list(p)), None)
+                                period_start = self._duration_seconds(period.get('start', 'PT0S')) if period is not None else 0.0
+                                if period is not None and period.get('duration'):
                                     end_seconds = self._duration_seconds(period.get('duration'))
                                 elif root.get('mediaPresentationDuration'):
                                     end_seconds = self._duration_seconds(root.get('mediaPresentationDuration')) - period_start

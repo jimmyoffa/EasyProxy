@@ -58,6 +58,8 @@ class VidXgoExtractor(BaseExtractor):
             return ""
         return proxy.replace("socks5h://", "socks5://", 1)
 
+    _normalize_proxy_url = _normalize_proxy
+
     async def extract(self, url: str, **kwargs) -> dict[str, Any]:
         self._validate_url(url)
         node = self._node_bin()

@@ -15,15 +15,10 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from aiohttp.client_exceptions import ClientOSError
 from config import get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
-from extractors.base import BaseExtractor
+from extractors.base import BaseExtractor, ExtractorError
 
 
 logger = logging.getLogger(__name__)
-
-
-class ExtractorError(Exception):
-    """Eccezione personalizzata per errori di estrazione."""
-    pass
 
 
 class RateLimitError(ExtractorError):

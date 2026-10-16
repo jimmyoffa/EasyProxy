@@ -112,12 +112,17 @@ def setup_recording_routes(app, recording_manager):
             qsl.append(('disable_ssl', '1'))
         url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(qsl), parsed.fragment))
 
-        if duration:
+        if duration is not None and duration != "":
             try:
                 duration = int(duration)
-            except ValueError:
+            except (TypeError, ValueError):
                 return web.json_response(
                     {"error": "Duration must be a number"}, status=400)
+            if duration <= 0:
+                return web.json_response(
+                    {"error": "Duration must be positive"}, status=400)
+        else:
+            duration = None
 
         recording = await recording_manager.start_recording(
             url=url,
@@ -221,7 +226,11 @@ def setup_recording_routes(app, recording_manager):
         # Security check
         recordings_dir = os.path.abspath(recording_manager.recordings_dir)
         file_abs = os.path.abspath(file_path)
-        if not file_abs.startswith(recordings_dir):
+        try:
+            in_recordings_dir = os.path.commonpath([recordings_dir, file_abs]) == recordings_dir
+        except ValueError:
+            in_recordings_dir = False
+        if not in_recordings_dir:
             return web.json_response({"error": "Access denied"}, status=403)
 
         filename = os.path.basename(file_path)
@@ -268,7 +277,11 @@ def setup_recording_routes(app, recording_manager):
         # Security check
         recordings_dir = os.path.abspath(recording_manager.recordings_dir)
         file_abs = os.path.abspath(file_path)
-        if not file_abs.startswith(recordings_dir):
+        try:
+            in_recordings_dir = os.path.commonpath([recordings_dir, file_abs]) == recordings_dir
+        except ValueError:
+            in_recordings_dir = False
+        if not in_recordings_dir:
             return web.json_response({"error": "Access denied"}, status=403)
 
         # Determine content type based on extension
@@ -383,12 +396,17 @@ def setup_recording_routes(app, recording_manager):
         if key_id and key:
             clearkey = f"{key_id}:{key}"
 
-        if duration:
+        if duration is not None and duration != "":
             try:
                 duration = int(duration)
-            except ValueError:
+            except (TypeError, ValueError):
                 return web.json_response(
                     {"error": "Duration must be a number"}, status=400)
+            if duration <= 0:
+                return web.json_response(
+                    {"error": "Duration must be positive"}, status=400)
+        else:
+            duration = None
 
         # Start recording in the background
         recording = await recording_manager.start_recording(
@@ -477,6 +495,8 @@ def setup_recording_routes(app, recording_manager):
             await recording_manager.stop_recording(recording_id)
             # Refresh recording data after stop
             recording = recording_manager.get_recording(recording_id)
+            if not recording:
+                return web.json_response({"error": "Recording not found"}, status=404)
 
         # Check if file exists and has content
         file_path = recording.get('file_path')

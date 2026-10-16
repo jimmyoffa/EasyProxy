@@ -8,13 +8,10 @@ from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
 import config as _cfg
-from extractors.base import BaseExtractor
+from extractors.base import BaseExtractor, ExtractorError
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
-
-class ExtractorError(Exception):
-    pass
 
 class MixdropExtractor(BaseExtractor):
     _result_cache = {}

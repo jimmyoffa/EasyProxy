@@ -136,6 +136,7 @@ class HLSProxyPagesMixin:
         template_path = os.path.join(self._template_cache_dir, filename)
         with open(template_path, "r", encoding="utf-8") as f:
             content = f.read()
+        content = content.replace("{{APP_VERSION}}", APP_VERSION)
         self._template_cache[filename] = content
         return content
 
@@ -924,7 +925,7 @@ class HLSProxyPagesMixin:
                             "required": True,
                             "content": {
                                 "multipart/form-data": {
-                                    "schema": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}},
+                                    "schema": {"type": "object", "properties": {"config": {"type": "string", "format": "binary"}}},
                                 }
                             },
                         },
@@ -1200,8 +1201,9 @@ class HLSProxyPagesMixin:
                     )
 
                 # Aggiungi password se necessaria
-                if API_PASSWORD:
-                    params.append(f"api_password={API_PASSWORD}")
+                effective_pw = req_password or API_PASSWORD
+                if effective_pw:
+                    params.append(f"api_password={urllib.parse.quote(str(effective_pw), safe='')}")
 
                 # Aggiungi bypass warp se richiesto
                 if bypass_warp:
@@ -1214,6 +1216,9 @@ class HLSProxyPagesMixin:
                     params.append(
                         f"proxy={urllib.parse.quote(proxy_route, safe='')}"
                     )
+
+                if str(item.get("disable_ssl") or "").lower() in ("1", "true", "yes"):
+                    params.append("disable_ssl=1")
 
                 # Costruisci URL finale
                 query_string = "&".join(params)
@@ -1280,15 +1285,19 @@ class HLSProxyPagesMixin:
         return web.Response(text=html, content_type="text/html")
 
     async def handle_admin_api_login(self, request):
+        import hmac
         try:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
-        password = data.get("password", "")
-        if API_PASSWORD and password != API_PASSWORD:
+        if not isinstance(data, dict):
+            return web.json_response({"error": "Invalid payload"}, status=400)
+        password = str(data.get("password") or "")
+        if API_PASSWORD and not hmac.compare_digest(password.encode(), API_PASSWORD.encode()):
             return web.json_response({"error": "Invalid password"}, status=401)
         resp = web.json_response({"ok": True})
-        resp.set_cookie("admin_token", API_PASSWORD, httponly=True, samesite="lax", max_age=86400 * 30, path="/")
+        if API_PASSWORD:
+            resp.set_cookie("admin_token", API_PASSWORD, httponly=True, samesite="lax", max_age=86400 * 30, path="/")
         return resp
 
     async def handle_admin_logout(self, request):

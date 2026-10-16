@@ -3,7 +3,6 @@ from urllib.parse import urljoin, urlparse
 from extractors.base import BaseExtractor, ExtractorError
 from utils.packed import eval_solver
 
-from extractors.base import BaseExtractor, ExtractorError
 
 class StreamWishExtractor(BaseExtractor):
     """StreamWish URL extractor."""

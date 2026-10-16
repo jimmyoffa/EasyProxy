@@ -4,6 +4,7 @@
 (function () {
     const groups = [
         [
+            {label: 'Home', href: '/', paths: ['/']},
             {label: 'Playlist Builder', href: '/builder', paths: ['/builder', '/playlist/builder']},
             {label: 'URL Generator', href: '/url-generator'},
             {label: 'DVR Recordings', href: '/recordings'},

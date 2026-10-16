@@ -109,7 +109,10 @@ class PlaylistBuilder:
                 processed_url_content = logical_line
                 
                 if 'pluto.tv' in logical_line:
-                    processed_url_content = logical_line
+                    current_clearkey = None
+                    current_ext_headers = {}
+                    yield logical_line + '\n'
+                    continue
                 elif 'vavoo.to' in logical_line:
                     encoded_url = urllib.parse.quote(logical_line, safe='')
                     processed_url_content = f"{base_url}/proxy/manifest.m3u8?url={encoded_url}"
@@ -240,11 +243,6 @@ class PlaylistBuilder:
                         else:
                             options[k] = v.lower() == 'true'
                 playlist_configs.append({'url': url, 'options': options})
-            elif '&' in definition:
-                # Legacy support
-                parts = definition.split('&', 1)
-                url = parts[1] if len(parts) > 1 else parts[0]
-                playlist_configs.append({'url': url, 'options': {}})
             else:
                 playlist_configs.append({'url': definition, 'options': {}})
         
