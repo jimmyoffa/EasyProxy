@@ -680,6 +680,16 @@ class DLStreamsExtractor(BaseExtractor):
                     limited_for,
                 )
                 continue
+            if channel_id == "861" and "/cast/stream-" in candidate.lower():
+                # 861 quarantine: the Player 2 backend serves a frozen video
+                # track (proven md5-identical frames). This still applies on
+                # top of the upstream site-following selection: frozen video
+                # carries video PES, so the upstream video-PES inspection
+                # promotes it as alive, and parking 861 on it wedges the
+                # player beyond recovery -- worse than a stall that heals
+                # when Player 1 returns.
+                logger.debug("DLStreams: skipping Player 2 for 861 (known-frozen backend)")
+                continue
             try:
                 headers = {
                     "User-Agent": self.base_headers["User-Agent"],
