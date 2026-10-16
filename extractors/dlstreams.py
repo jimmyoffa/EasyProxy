@@ -283,14 +283,23 @@ class DLStreamsExtractor(BaseExtractor):
     @classmethod
     def _first_media_uri(cls, body: str, base_url: str, want_playlist: bool) -> str | None:
         """First non-comment URI in a playlist: variant (.m3u8) or segment."""
+        uris = cls._first_media_uris(body, base_url, want_playlist, limit=1)
+        return uris[0] if uris else None
+
+    @classmethod
+    def _first_media_uris(cls, body: str, base_url: str, want_playlist: bool, limit: int = 2) -> list:
+        """First ``limit`` non-comment URIs in a playlist: variants or segments."""
+        out = []
         for raw in (body or "").splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
             low = line.lower().split("?")[0].split("#")[0]
             if (low.endswith(".m3u8")) == want_playlist:
-                return cls._inherit_query_if_missing(urljoin(base_url, line), base_url)
-        return None
+                out.append(cls._inherit_query_if_missing(urljoin(base_url, line), base_url))
+                if len(out) >= limit:
+                    break
+        return out
 
     @staticmethod
     def _segment_looks_like_image(segment_url: str, content_type: str, head: bytes) -> bool:
@@ -493,19 +502,33 @@ class DLStreamsExtractor(BaseExtractor):
                 current_url = variant
                 if "#EXTM3U" not in current_body[:8000]:
                     return False
-            # Variant -> segment. Do not use Range for a deep TS probe: an
-            # audio-only prefix cannot establish whether video exists later.
-            segment = self._first_media_uri(current_body, current_url, want_playlist=False)
-            if not segment:
+            # Variant -> segments. A single URL can 403 while its siblings
+            # serve fine (per-URL signed tokens), so try the second listed
+            # segment before condemning the player. Each attempt keeps the
+            # upstream bounded-probe semantics: no Range on a deep TS probe
+            # (an audio-only prefix cannot establish whether video exists
+            # later), Range only for the shallow/encrypted HTTP probe.
+            segments = self._first_media_uris(current_body, current_url, want_playlist=False, limit=2)
+            if not segments:
                 logger.debug("DLStreams: validation of %s -> no segments listed", stream_url)
                 return False
             encrypted = bool(re.search(r'#EXT-X-KEY:[^\n]*METHOD=(?!NONE\b)', current_body))
-            probe_headers = {k: v for k, v in headers.items() if k.lower() != "range"}
-            if not deep or encrypted:
-                probe_headers["Range"] = "bytes=0-4095"
-            if not await self._segment_carries_video(
-                session, segment, probe_headers, _timeout(12), deep=deep, encrypted=encrypted
-            ):
+            alive = False
+            for cand_seg in segments:
+                probe_headers = {k: v for k, v in headers.items() if k.lower() != "range"}
+                if not deep or encrypted:
+                    probe_headers["Range"] = "bytes=0-4095"
+                try:
+                    if await self._segment_carries_video(
+                        session, cand_seg, probe_headers, _timeout(12), deep=deep, encrypted=encrypted
+                    ):
+                        alive = True
+                        break
+                except Exception as e:
+                    logger.debug("DLStreams: segment probe of %s failed: %s", cand_seg, e)
+                    continue
+                logger.debug("DLStreams: segment probe of %s -> no video payload", cand_seg)
+            if not alive:
                 return False
             # AES key, if the variant uses one
             key_match = re.search(r'#EXT-X-KEY:[^\n]*URI="([^"]+)"', current_body)
