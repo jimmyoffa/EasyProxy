@@ -303,7 +303,7 @@ class VavooExtractor(BaseExtractor):
             try:
                 async with session.post(self._resolve_url, json=body, headers=headers,
                                         timeout=ClientTimeout(total=30), ssl=False) as resp:
-                    if resp.status in (451, 502) and attempt < 1:
+                    if resp.status in (451, 500, 502) and attempt < 1:
                         logger.warning(f"Vavoo resolve status {resp.status}, switching base site")
                         self._switch_to_next_base()
                         continue
