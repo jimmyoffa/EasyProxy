@@ -412,6 +412,70 @@ class ManifestRewriter:
             return manifest_content
 
     @staticmethod
+    def _order_shared_audio_variants(lines: list) -> list:
+        """Sort variants highest-bandwidth-first when an audio group is shared.
+
+        FFmpeg assigns a shared rendition (``#EXT-X-MEDIA`` with URI) to the
+        first program referencing it, while players such as mpv default to the
+        highest-bandwidth variant. In the usual ascending master the audio then
+        lives in program 0 while the video plays program N, and mpv hides the
+        audio tracks completely (RaiPlay multiaudio). Keeping the highest
+        variant first makes the shared audio belong to the program players pick
+        by default, with ABR left intact.
+        """
+        audio_groups = set()
+        variant_indexes = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#EXT-X-MEDIA:") and 'URI="' in stripped:
+                if re.search(r"TYPE=AUDIO", stripped):
+                    group_match = re.search(r'GROUP-ID="([^"]+)"', stripped)
+                    if group_match:
+                        audio_groups.add(group_match.group(1))
+            elif stripped.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(lines):
+                variant_indexes.append(i)
+        if len(variant_indexes) < 2 or not audio_groups:
+            return lines
+
+        variants = []
+        group_uses = {}
+        for i in variant_indexes:
+            inf = lines[i].strip()
+            group_match = re.search(r'AUDIO="([^"]+)"', inf)
+            group = group_match.group(1) if group_match else ""
+            if group in audio_groups:
+                group_uses[group] = group_uses.get(group, 0) + 1
+            bandwidth_match = re.search(r"BANDWIDTH=(\d+)", inf)
+            variants.append(
+                {
+                    "inf": lines[i],
+                    "url": lines[i + 1],
+                    "bandwidth": int(bandwidth_match.group(1)) if bandwidth_match else 0,
+                }
+            )
+        if not any(count > 1 for count in group_uses.values()):
+            return lines
+
+        order = sorted(range(len(variants)), key=lambda n: variants[n]["bandwidth"], reverse=True)
+        if order == list(range(len(variants))):
+            return lines
+
+        position = {index: n for n, index in enumerate(variant_indexes)}
+        ordered = [variants[n] for n in order]
+        reordered = []
+        for i, line in enumerate(lines):
+            if i in position:
+                item = ordered[position[i]]
+                reordered.append(item["inf"])
+                reordered.append(item["url"])
+            elif i - 1 in position:
+                continue  # URI line already emitted with its STREAM-INF
+            else:
+                reordered.append(line)
+        logger.debug("HLS: reordered %s variants for shared audio group", len(variants))
+        return reordered
+
+    @staticmethod
     async def rewrite_manifest_urls(
         manifest_content: str,
         base_url: str,
@@ -433,7 +497,7 @@ class ManifestRewriter:
         dual_video_track: int = 0,
     ) -> str:
         """Riscrive gli URL nei manifest HLS per passare attraverso il proxy."""
-        lines = manifest_content.split("\n")
+        lines = ManifestRewriter._order_shared_audio_variants(manifest_content.split("\n"))
         rewritten_lines = []
 
         # no_bypass e mantenuto per compatibilita, ma il rewriter ora proxa sempre.
