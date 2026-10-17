@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 class Sports99Extractor(BaseExtractor):
     """Sports99 / CDNLiveTV URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="sports99")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="sports99", bypass_warp=bypass_warp)
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Sports99 stream URL."""

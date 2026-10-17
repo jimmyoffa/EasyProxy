@@ -36,8 +36,8 @@ _RUNNER = os.path.join(
 class VidXgoExtractor(BaseExtractor):
     """VidXgo embed -> HLS extractor (Node tls-client runner)."""
 
-    def __init__(self, request_headers: dict = None, proxies: list = None, extractor_name: str = "vidxgo"):
-        super().__init__(request_headers, proxies, extractor_name=extractor_name)
+    def __init__(self, request_headers: dict = None, proxies: list = None, extractor_name: str = "vidxgo", bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name=extractor_name, bypass_warp=bypass_warp)
         self.request_headers = request_headers or {}
         self.selected_proxy = None
 
@@ -56,6 +56,9 @@ class VidXgoExtractor(BaseExtractor):
     def _normalize_proxy(proxy: str | None) -> str:
         if not proxy:
             return ""
+        proxy = _cfg.resolve_proxy_alias(str(proxy).strip()) or str(proxy).strip()
+        if "://" not in proxy:
+            proxy = f"socks5://{proxy}"
         return proxy.replace("socks5h://", "socks5://", 1)
 
     _normalize_proxy_url = _normalize_proxy
@@ -75,7 +78,7 @@ class VidXgoExtractor(BaseExtractor):
             proxy = _cfg.effective_forced_proxy(url, self._forced_proxy) or await get_preferred_proxy_for_url(
                 url, self.extractor_name, self.proxies, self.bypass_warp_active
             )
-        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
+        if proxy is None and not self._force_direct and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError("VidXgo: direct fallback disabled; no proxy route available")
         self.selected_proxy = proxy
         self.last_used_proxy = proxy
@@ -96,6 +99,7 @@ class VidXgoExtractor(BaseExtractor):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=os.name != "nt",
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         except FileNotFoundError as exc:
@@ -105,9 +109,13 @@ class VidXgoExtractor(BaseExtractor):
         finally:
             if proc and proc.returncode is None:
                 try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
+                    if os.name != "nt":
+                        import signal
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except BaseException:
                     pass
 
         raw = stdout.decode("utf-8", errors="replace").strip() if stdout else ""

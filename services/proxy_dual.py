@@ -263,6 +263,66 @@ class HLSProxyDualMixin:
         warp_off = str(spec.get("warp") or "").lower() == "off" or bool(spec.get("warp_off"))
         return warp_off, proxy_off, forced_proxy
 
+    @staticmethod
+    async def _gather_dual_pair(coro_a, coro_b):
+        """Run two coroutines concurrently and cancel the sibling if either fails."""
+        tasks = [asyncio.ensure_future(coro_a), asyncio.ensure_future(coro_b)]
+        try:
+            return await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for t in tasks:
+                if t.done() and not t.cancelled():
+                    t.exception()
+
+    async def _resolve_dual_spec_coalesced(self, spec: Any, required_resolution: int = 0) -> dict:
+        """Coalesce identical in-flight DUAL source resolutions so concurrent
+        player polls do not spawn duplicate Node/extractor processes, while still
+        cancelling the underlying resolution if all waiting callers cancel."""
+        inflight = getattr(self, "_dual_resolve_inflight", None)
+        if inflight is None:
+            inflight = {}
+            self._dual_resolve_inflight = inflight
+        try:
+            key = (json.dumps(spec, sort_keys=True, default=str), int(required_resolution or 0))
+        except Exception:
+            key = (str(spec), int(required_resolution or 0))
+
+        entry = inflight.get(key)
+        if entry is None or entry[0].done():
+            shared = asyncio.create_task(
+                self._resolve_dual_spec(spec, required_resolution=required_resolution)
+            )
+            entry = [shared, 0]
+            inflight[key] = entry
+
+            def _cleanup(fut, k=key):
+                cur = inflight.get(k)
+                if cur is not None and cur[0] is fut:
+                    inflight.pop(k, None)
+
+            shared.add_done_callback(_cleanup)
+        else:
+            shared = entry[0]
+
+        entry[1] += 1
+        try:
+            res = await asyncio.shield(shared)
+            entry[1] -= 1
+            return dict(res)
+        except BaseException:
+            entry[1] -= 1
+            if entry[1] <= 0 and not shared.done():
+                if inflight.get(key) is entry:
+                    inflight.pop(key, None)
+                shared.cancel()
+                await asyncio.gather(shared, return_exceptions=True)
+            raise
+
     async def _resolve_dual_spec(self, spec: Any, required_resolution: int = 0) -> dict:
         if isinstance(spec, str):
             spec = {"url": spec}
@@ -817,16 +877,17 @@ class HLSProxyDualMixin:
         requested_resolution = int(body.get("resolution") or 2160)
         required_video_resolution = 2160 if requested_resolution >= 2160 else 0
         # These two sources are independent. Resolve both concurrently so a
-        # slow extractor/proxy on one side does not delay starting the other.
+        # slow extractor/proxy on one side does not delay starting the other,
+        # and cancel the sibling immediately if either side fails.
         if required_video_resolution:
-            video_task = self._resolve_dual_spec(
+            video_coro = self._resolve_dual_spec_coalesced(
                 video_spec, required_resolution=required_video_resolution
             )
         else:
-            video_task = self._resolve_dual_spec(video_spec)
-        video, audio = await asyncio.gather(
-            video_task,
-            self._resolve_dual_spec(audio_spec),
+            video_coro = self._resolve_dual_spec_coalesced(video_spec)
+        video, audio = await self._gather_dual_pair(
+            video_coro,
+            self._resolve_dual_spec_coalesced(audio_spec),
         )
         playback_key = request.query.get("stream_key") or f"dual-{secrets.token_hex(6)}"
         video["stream_key"] = f"{playback_key}-video"
@@ -834,7 +895,7 @@ class HLSProxyDualMixin:
 
         # Both initial manifests are independent as well. The selected audio
         # playlist is fetched later because its URL comes from audio_text.
-        (video_text, video_base), (audio_text, audio_base) = await asyncio.gather(
+        (video_text, video_base), (audio_text, audio_base) = await self._gather_dual_pair(
             self._manifest(video),
             self._manifest(audio),
         )
@@ -1032,6 +1093,7 @@ class HLSProxyDualMixin:
                         raise DualLinksError(502, "DUAL service did not return a fallback session token")
             except BaseException:
                 prepared_task.cancel()
+                await asyncio.gather(prepared_task, return_exceptions=True)
                 raise
             prepared = await prepared_task
             audio_hid = str(prepared.get("hid") or "")
@@ -1042,15 +1104,18 @@ class HLSProxyDualMixin:
             prepared["url"] = dual_service._audio_url(request, audio_hid, token)
             if synced is None or str(synced.get("status") or "") != "ok":
                 synced = await self._dual_sync_json(request, sync_body(prepared))
-        finally:
-            _unpin_all()
-        status = str(synced.get("status") or "")
-        if status != "ok":
+            status = str(synced.get("status") or "")
+            if status != "ok":
+                detail = synced.get("message") or synced.get("detail") or "DUAL sync failed"
+                raise DualLinksError(409, str(detail))
+            prepared_subtitles = await asyncio.gather(*subtitle_tasks)
+        except BaseException:
             for t in subtitle_tasks:
                 t.cancel()
             await asyncio.gather(*subtitle_tasks, return_exceptions=True)
-            detail = synced.get("message") or synced.get("detail") or "DUAL sync failed"
-            raise DualLinksError(409, str(detail))
+            raise
+        finally:
+            _unpin_all()
         subtitle_items = [
             {
                 **entry,
@@ -1059,7 +1124,7 @@ class HLSProxyDualMixin:
             }
             for entry in video_subtitle_entries
         ]
-        for prepared_subtitle in await asyncio.gather(*subtitle_tasks):
+        for prepared_subtitle in prepared_subtitles:
             if not prepared_subtitle:
                 continue
             subtitle_items.append({

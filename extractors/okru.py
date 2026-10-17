@@ -5,8 +5,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class OkruExtractor(BaseExtractor):
     """Okru (ok.ru) URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="okru")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="okru", bypass_warp=bypass_warp)
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Okru URL."""

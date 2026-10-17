@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 class StreamHGExtractor(BaseExtractor):
     """Extractor for StreamHG-style players (dhcplay/vibuxer mirrors)."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="streamhg")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="streamhg", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "hls_proxy"
 
     @staticmethod

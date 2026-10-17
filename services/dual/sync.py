@@ -469,7 +469,7 @@ class SyncEngine:
         try:
             init_path = root / "init.mp4"
             segment_path = root / "first.m4s"
-            await asyncio.gather(
+            await self._gather_strict(
                 self._download(urljoin(url, match.group(1)), init_path, headers),
                 self._download(urljoin(url, first), segment_path, headers),
             )
@@ -915,6 +915,9 @@ class SyncEngine:
                 ),
                 return_exceptions=True,
             )
+            for sample in samples:
+                if isinstance(sample, asyncio.CancelledError):
+                    raise sample
             failure = next((sample for sample in samples if isinstance(sample, BaseException)), None)
             if failure is not None:
                 raise RuntimeError(f"{type(failure).__name__}: {str(failure)[:260]}")
@@ -1015,6 +1018,9 @@ class SyncEngine:
                     *audio_tasks,
                     return_exceptions=True,
                 )
+                for item in decoded:
+                    if isinstance(item, asyncio.CancelledError):
+                        raise item
                 logger.info(
                     "[DUAL] linear playlists ready position=%.1f",
                     position,
@@ -1053,6 +1059,9 @@ class SyncEngine:
                     *decode_tasks,
                     return_exceptions=True,
                 )
+                for item in decoded_samples:
+                    if isinstance(item, asyncio.CancelledError):
+                        raise item
                 logger.info(
                     "[DUAL] linear PCM ready position=%.1f",
                     position,
@@ -1096,6 +1105,8 @@ class SyncEngine:
                 for index, position in enumerate(positions)
             ), return_exceptions=True)
             for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
                 if isinstance(result, BaseException):
                     logger.warning(
                         "[DUAL] linear sync sample failed: %s: %s",

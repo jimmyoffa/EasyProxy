@@ -39,8 +39,8 @@ class DroploadExtractor(BaseExtractor):
     # ``vcap`` marker is IP-bound, so every request must leave via IPv4.
     force_ipv4 = True
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="dropload")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="dropload", bypass_warp=bypass_warp)
 
     @staticmethod
     def _extract_m3u8(text: str) -> str | None:
@@ -49,7 +49,12 @@ class DroploadExtractor(BaseExtractor):
 
     async def _solve_turnstile(self, url: str):
         """Return ``(html, cookie_header, user_agent)`` for a solved page."""
-        proxy = get_solver_proxy_url(self._session_proxy)
+        proxy = (
+            None
+            if (self._force_direct or self.bypass_warp_active) and not self._session_proxy
+            else get_solver_proxy_url(self._session_proxy)
+        )
+        allow_direct = self._force_direct or is_direct_connection_allowed(self.bypass_warp_active)
         html = ""
         cookie_header = ""
         user_agent = ""
@@ -58,7 +63,7 @@ class DroploadExtractor(BaseExtractor):
                 solution = await solve_cloudflare(
                     url,
                     proxy_url=proxy,
-                    allow_direct=is_direct_connection_allowed(),
+                    allow_direct=allow_direct,
                     tabs_till_verify=self.TURNSTILE_TABS,
                 )
             except FlareSolverrError as exc:
@@ -154,14 +159,17 @@ class DroploadExtractor(BaseExtractor):
         if not final_url:
             raise ExtractorError("Dropload extraction failed: no media URL found")
 
-        self.base_headers.update(extra_headers)
-        self.base_headers["referer"] = url
-        self.base_headers["origin"] = referer.rstrip("/")
+        req_headers = {
+            **self.base_headers,
+            **extra_headers,
+            "referer": url,
+            "origin": referer.rstrip("/"),
+        }
         mediaflow_endpoint = "proxy_stream_endpoint" if ".mp4" in final_url else self.mediaflow_endpoint
 
         return {
             "destination_url": urljoin(url, final_url),
-            "request_headers": self.base_headers,
+            "request_headers": req_headers,
             "mediaflow_endpoint": mediaflow_endpoint,
             "selected_proxy": self.last_used_proxy,
             "force_direct": self._force_direct,

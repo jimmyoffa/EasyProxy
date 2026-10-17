@@ -49,7 +49,7 @@ class BaseExtractor:
     # to the solver's (IPv4) address.
     force_ipv4 = False
 
-    def __init__(self, request_headers: dict, proxies: list = None, extractor_name: str = "generic"):
+    def __init__(self, request_headers: dict, proxies: list = None, extractor_name: str = "generic", bypass_warp: bool = False):
         self.request_headers = request_headers
         self.base_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -63,7 +63,9 @@ class BaseExtractor:
         self._route_sessions = {}
         # New-contract routing state (None = defer to contexts). Set by
         # _apply_routing_kwargs at the top of extract(); see AGENTS.md.
-        self.bypass_warp_active = None
+        self._init_bypass_warp = bool(bypass_warp)
+        self.bypass_warp_active = bool(bypass_warp) if bypass_warp else None
+        self._last_computed_bypass_warp = self.bypass_warp_active
         self._forced_proxy = None
         self._force_direct = False
         self.last_used_proxy = None
@@ -73,19 +75,28 @@ class BaseExtractor:
         warp/direct as kwargs, not via context). proxy_exclude_domains drops
         even an explicit ?proxy= (WARP exempt); see config.effective_forced_proxy."""
         kwargs = kwargs or {}
+        if self.bypass_warp_active != getattr(self, "_last_computed_bypass_warp", None):
+            self._init_bypass_warp = bool(self.bypass_warp_active)
         raw_proxy = kwargs.get("proxy")
-        bypass_proxies = str(raw_proxy or "").lower() in {"off", "none", "no"} or BYPASS_PROXIES_CONTEXT.get()
-        bypass_warp = bool(kwargs.get("bypass_warp") or str(kwargs.get("warp", "")).lower() == "off" or BYPASS_WARP_CONTEXT.get() or self.bypass_warp_active)
+        raw_proxy_norm = str(raw_proxy or "").strip().lower()
+        bypass_proxies = raw_proxy_norm in {"off", "none", "no", "false", "0", "direct"} or BYPASS_PROXIES_CONTEXT.get()
+        warp_off = bool(kwargs.get("bypass_warp") or str(kwargs.get("warp", "")).strip().lower() in {"off", "false", "0"})
+        direct_flag = str(kwargs.get("direct", "")).strip().lower() in {"1", "true", "yes", "on"} or raw_proxy_norm == "direct"
+        bypass_warp = bool(warp_off or direct_flag or BYPASS_WARP_CONTEXT.get() or self._init_bypass_warp)
         self.bypass_warp_active = bypass_warp
-        direct_requested = str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"} or (bypass_proxies and bypass_warp)
+        self._last_computed_bypass_warp = bypass_warp
+        direct_requested = direct_flag or (bypass_proxies and bypass_warp)
         if direct_requested or (bypass_proxies and bypass_warp):
             self._forced_proxy, self._force_direct = None, True
         elif bypass_proxies:
             self._forced_proxy, self._force_direct = (_cfg.WARP_PROXY_URL if _cfg._get_dynamic_warp_enabled() else None), False
             if not self._forced_proxy:
                 self._force_direct = True
-        elif raw_proxy and str(raw_proxy).lower() not in {"on", "auto", "true", ""}:
-            self._forced_proxy, self._force_direct = str(raw_proxy), False
+        elif raw_proxy and raw_proxy_norm not in {"on", "auto", "true", ""}:
+            resolved = _cfg.resolve_proxy_alias(str(raw_proxy).strip())
+            if resolved and "://" not in resolved:
+                resolved = f"socks5h://{resolved}"
+            self._forced_proxy, self._force_direct = str(resolved), False
         else:
             self._forced_proxy, self._force_direct = None, False
         self._forced_proxy = _cfg.effective_forced_proxy(url, self._forced_proxy)

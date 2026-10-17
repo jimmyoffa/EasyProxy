@@ -6,8 +6,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class LiveTVExtractor(BaseExtractor):
     """LiveTV URL extractor for both M3U8 and MPD streams."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="livetv")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="livetv", bypass_warp=bypass_warp)
         
         # Patterns for stream URL extraction
         self.fallback_pattern = re.compile(

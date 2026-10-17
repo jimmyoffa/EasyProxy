@@ -339,3 +339,4 @@ try {
     try { await proxyDispatcher.close(); } catch {}
   }
 }
+process.exit(process.exitCode || 0);

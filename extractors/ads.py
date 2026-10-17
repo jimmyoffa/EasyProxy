@@ -27,8 +27,8 @@ def ads_configured_host() -> str:
 class ADSExtractor(BaseExtractor):
     """Resolve AltadefinizioneStreaming's IP-bound CDN URLs."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="ads")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="ads", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "proxy_stream_endpoint"
 
     @staticmethod

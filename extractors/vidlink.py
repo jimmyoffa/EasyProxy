@@ -30,8 +30,8 @@ _UA = (
 class VidLinkExtractor(BaseExtractor):
     """Resolve VidLink movie/TV embeds to their highest-quality stream."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidlink")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidlink", bypass_warp=bypass_warp)
         self.request_headers = request_headers or {}
 
     @staticmethod
@@ -118,6 +118,7 @@ class VidLinkExtractor(BaseExtractor):
 
     @staticmethod
     def _normalize_proxy_url(proxy_url: str) -> str:
+        proxy_url = _cfg.resolve_proxy_alias(str(proxy_url).strip()) or str(proxy_url).strip()
         # Preserve the proxy scheme selected by the routing policy.
         if proxy_url.startswith("socks5://"):
             return proxy_url
@@ -150,7 +151,7 @@ class VidLinkExtractor(BaseExtractor):
             proxy = _cfg.effective_forced_proxy(api_url, self._forced_proxy) or await get_preferred_proxy_for_url(
                 api_url, self.extractor_name, self.proxies, self.bypass_warp_active
             )
-        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
+        if proxy is None and not self._force_direct and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError(
                 "VidLink: direct fallback disabled; no proxy route available"
             )

@@ -49,8 +49,8 @@ class VidSonicExtractor(BaseExtractor):
 
     REQUEST_TIMEOUT_TOTAL = 10
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidsonic")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidsonic", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "hls_proxy"
 
     @staticmethod

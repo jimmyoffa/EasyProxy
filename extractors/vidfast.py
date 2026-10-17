@@ -33,11 +33,14 @@ _TV_RE = re.compile(r"^/tv/\d+/\d+/\d+/?$", re.IGNORECASE)
 class VidFastExtractor:
     """Resolve ``vidfast.vc`` movie/TV pages to a playable HLS URL."""
 
-    def __init__(self, request_headers: dict | None = None, proxies: list | None = None):
+    def __init__(self, request_headers: dict | None = None, proxies: list | None = None, bypass_warp: bool = False):
         self.request_headers = request_headers or {}
         self.proxies = proxies or []
         self.extractor_name = "vidfast"
         self.mediaflow_endpoint = "hls_proxy"
+        self._init_bypass_warp = bool(bypass_warp)
+        self.bypass_warp_active = bool(bypass_warp)
+        self._last_computed_bypass_warp = self.bypass_warp_active
         self.last_used_proxy = None
 
     @staticmethod
@@ -61,27 +64,35 @@ class VidFastExtractor:
         if not os.path.exists(_RUNNER):
             raise ExtractorError(f"VidFast: runner script not found at {_RUNNER}")
 
+        if self.bypass_warp_active != getattr(self, "_last_computed_bypass_warp", self._init_bypass_warp):
+            self._init_bypass_warp = bool(self.bypass_warp_active)
         raw_proxy = kwargs.get("proxy")
         raw_proxy_norm = str(raw_proxy or "").strip().lower()
         bypass_proxies = (
             raw_proxy_norm in {"off", "false", "0", "direct", "none", "no"}
             or _cfg.BYPASS_PROXIES_CONTEXT.get()
         )
+        direct_flag = (
+            str(kwargs.get("direct", "")).strip().lower() in {"1", "true", "yes", "on"}
+            or raw_proxy_norm == "direct"
+        )
         bypass_warp = bool(
             kwargs.get("bypass_warp")
-            or str(kwargs.get("warp", "")).lower() == "off"
+            or str(kwargs.get("warp", "")).strip().lower() in {"off", "false", "0"}
+            or direct_flag
             or _cfg.BYPASS_WARP_CONTEXT.get()
+            or self._init_bypass_warp
         )
-        direct_requested = (
-            str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"}
-            or raw_proxy_norm == "direct"
-            or (bypass_proxies and bypass_warp)
-        )
-        forced_proxy = (
-            None
-            if (bypass_proxies or raw_proxy_norm in {"off", "false", "0", "direct", "none", "no", "on", "auto", "true", ""})
-            else str(raw_proxy).strip()
-        )
+        self.bypass_warp_active = bypass_warp
+        self._last_computed_bypass_warp = bypass_warp
+        direct_requested = direct_flag or (bypass_proxies and bypass_warp)
+        if bypass_proxies or raw_proxy_norm in {"off", "false", "0", "direct", "none", "no", "on", "auto", "true", ""}:
+            forced_proxy = None
+        else:
+            resolved = _cfg.resolve_proxy_alias(str(raw_proxy).strip())
+            if resolved and "://" not in resolved:
+                resolved = f"socks5h://{resolved}"
+            forced_proxy = str(resolved)
         forced_proxy = _cfg.effective_forced_proxy(url, forced_proxy)
 
         if direct_requested and (bypass_proxies or not forced_proxy):
@@ -143,6 +154,7 @@ class VidFastExtractor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=os.name != "nt",
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
         except FileNotFoundError as exc:
@@ -152,9 +164,13 @@ class VidFastExtractor:
         finally:
             if proc and proc.returncode is None:
                 try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
+                    if os.name != "nt":
+                        import signal
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except BaseException:
                     pass
 
         raw = stdout.decode("utf-8", errors="replace").strip() if stdout else ""

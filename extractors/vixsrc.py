@@ -122,6 +122,7 @@ class VixSrcExtractor:
             "off", "false", "0", "direct", "none", "no", "on", "auto", "true"
         ):
             return ""
+        proxy_value = _cfg.resolve_proxy_alias(proxy_value) or proxy_value
         # Preserve explicit SOCKS5 routes. Scheme-less third-party proxies
         # retain the existing socks5h default.
         if proxy_value.startswith("socks5://"):

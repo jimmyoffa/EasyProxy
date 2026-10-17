@@ -32,7 +32,7 @@ class EmbedStExtractor(BaseExtractor):
     curl_only = True
 
     def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
-        super().__init__(request_headers, proxies, extractor_name="embedst")
+        super().__init__(request_headers, proxies, extractor_name="embedst", bypass_warp=bypass_warp)
         self.bypass_warp_active = bypass_warp
         self.mediaflow_endpoint = "hls_manifest_proxy"
         self._curl_session = None
@@ -46,10 +46,9 @@ class EmbedStExtractor(BaseExtractor):
         if not node:
             raise ExtractorError("EmbedSt: node binary not found on PATH (required for headless WASM extraction)")
 
-        # If this is a streamed.pk/watch/ page, resolve the embed.st iframe URL first.
-        # ponytail: reset per-request routing state so the pre-merge fetch below
-        # behaves exactly like auto routing (no stale forced proxy).
-        self._forced_proxy, self._force_direct = None, False
+        # Apply per-request routing before resolving streamed.pk/watch/ iframe URL
+        # so the pre-resolve fetch honors ?proxy=, warp=off, or direct=1.
+        self._apply_routing_kwargs(url, kwargs)
         url = await self._resolve_embed_url(url)
 
         if "embed.st/embed/" not in url.lower() and "embedsports.top/embed/" not in url.lower():

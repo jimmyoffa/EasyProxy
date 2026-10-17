@@ -19,8 +19,8 @@ class FileMoonExtractor(F16PxExtractor):
 
     ERROR_PREFIX = "FileMoon"
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies)
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, bypass_warp=bypass_warp)
         self.extractor_name = "filemoon"
 
     @staticmethod

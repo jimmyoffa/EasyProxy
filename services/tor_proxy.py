@@ -359,6 +359,14 @@ async def _verify_config() -> None:
         process.kill()
         await process.wait()
         raise TorError("Tor configuration verification timed out")
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
+        raise
     output = " ".join(
         part.decode("utf-8", "replace").strip()
         for part in (stderr, stdout)

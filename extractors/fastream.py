@@ -5,8 +5,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class FastreamExtractor(BaseExtractor):
     """Fastream URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="fastream")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="fastream", bypass_warp=bypass_warp)
 
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract Fastream URL."""

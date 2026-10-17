@@ -424,6 +424,17 @@ class RecordingManager:
 
             return self.db.get_recording(recording_id)
 
+        except asyncio.CancelledError:
+            proc = self.processes.pop(recording_id, None)
+            self.start_times.pop(recording_id, None)
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            self.db.update_recording_status(recording_id, 'failed', 'Recording startup cancelled')
+            raise
         except Exception as e:
             logger.error(f"Failed to start recording {recording_id}: {e}")
             self.db.update_recording_status(recording_id, 'failed', str(e))

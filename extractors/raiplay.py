@@ -17,9 +17,9 @@ _RELINKER_HOST = "mediapolisvod.rai.it"
 class RaiPlayExtractor(BaseExtractor):
     """Extract clear or protected RaiPlay VOD streams through the relinker."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
         super().__init__(
-            request_headers, proxies=proxies, extractor_name="raiplay"
+            request_headers, proxies=proxies, extractor_name="raiplay", bypass_warp=bypass_warp
         )
 
     async def extract(self, url: str, **kwargs) -> dict:

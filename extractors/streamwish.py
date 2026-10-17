@@ -7,8 +7,8 @@ from utils.packed import eval_solver
 class StreamWishExtractor(BaseExtractor):
     """StreamWish URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="streamwish")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="streamwish", bypass_warp=bypass_warp)
 
     @staticmethod
     def _extract_m3u8(text: str) -> str | None:
@@ -19,7 +19,13 @@ class StreamWishExtractor(BaseExtractor):
     async def extract(self, url: str, **kwargs) -> dict:
         """Extract StreamWish URL."""
         self._apply_routing_kwargs(url, kwargs)
-        referer = self.base_headers.get("Referer")
+        kw_headers = kwargs.get("headers") or {}
+        referer = (
+            kw_headers.get("Referer")
+            or kw_headers.get("referer")
+            or self.request_headers.get("Referer")
+            or self.request_headers.get("referer")
+        )
         if not referer:
             parsed = urlparse(url)
             referer = f"{parsed.scheme}://{parsed.netloc}/"
@@ -60,14 +66,15 @@ class StreamWishExtractor(BaseExtractor):
             final_url = urljoin(iframe_url, final_url)
 
         origin = f"{urlparse(referer).scheme}://{urlparse(referer).netloc}"
-        self.base_headers.update({
+        req_headers = {
+            **self.base_headers,
             "Referer": referer,
             "Origin": origin,
-        })
+        }
 
         return {
             "destination_url": final_url,
-            "request_headers": self.base_headers,
+            "request_headers": req_headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "selected_proxy": self.last_used_proxy,
             "force_direct": self._force_direct,

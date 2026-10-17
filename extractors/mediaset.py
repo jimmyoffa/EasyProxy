@@ -138,9 +138,9 @@ def _extract_mpd_reference(
 class MediasetExtractor(BaseExtractor):
     """Extract protected Mediaset Infinity and WittyTV VOD streams."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
         super().__init__(
-            request_headers, proxies=proxies, extractor_name="mediaset"
+            request_headers, proxies=proxies, extractor_name="mediaset", bypass_warp=bypass_warp
         )
         self.mediaflow_endpoint = "mpd_manifest_proxy"
 
@@ -438,6 +438,6 @@ class MediasetExtractor(BaseExtractor):
 class WittyTVExtractor(MediasetExtractor):
     """Named alias so WittyTV can be configured independently in Admin."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies=proxies)
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies=proxies, bypass_warp=bypass_warp)
         self.extractor_name = "wittytv"

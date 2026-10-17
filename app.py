@@ -101,6 +101,11 @@ def create_app():
     app.router.add_get('/proxy/hls/segment.m4s', proxy.handle_proxy_request)
     app.router.add_get('/proxy/hls/segment.mp4', proxy.handle_proxy_request)
     app.router.add_get('/proxy/hls/segment.vtt', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.aac', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.mp3', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.m4a', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.ac3', proxy.handle_proxy_request)
+    app.router.add_get('/proxy/hls/segment.ec3', proxy.handle_proxy_request)
     
     app.router.add_get('/playlist', proxy.handle_playlist_request)
     app.router.add_get('/segment/{tail:.*}', proxy.handle_ts_segment)
@@ -156,15 +161,24 @@ def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):
-        asyncio.create_task(proxy.start_tasks())
-        asyncio.create_task(recording_manager.cleanup_loop())
-        asyncio.create_task(wg_tunnels.keepalive_loop())
-        asyncio.create_task(tor_proxy.keepalive_loop())
+        app['_startup_tasks'] = [
+            asyncio.create_task(proxy.start_tasks()),
+            asyncio.create_task(wg_tunnels.keepalive_loop()),
+            asyncio.create_task(tor_proxy.keepalive_loop()),
+        ]
+        recording_manager.start_cleanup_loop()
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app):
+        from services.flaresolverr import shutdown_flare_solver
+        tasks = app.pop('_startup_tasks', ())
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await tor_proxy.stop()
         await recording_manager.shutdown()
+        await shutdown_flare_solver()
     app.on_shutdown.append(on_shutdown)
     
     return app

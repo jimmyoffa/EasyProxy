@@ -167,6 +167,7 @@ async function main() {
     captured_manifest: masterResponse.text,
     captured_manifests: captured,
   }));
+  process.exit(0);
 }
 
 main().catch((error) => fail(error?.message || String(error)));

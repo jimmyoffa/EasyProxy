@@ -295,6 +295,7 @@ class HLSProxyCoreMixin:
         control_script = WARP_CTL_SCRIPT
         if not os.path.exists(control_script):
             return "unknown", "control script unavailable"
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "/bin/sh",
@@ -309,7 +310,21 @@ class HLSProxyCoreMixin:
                 return "up", detail or "status=running"
             return "down", detail or f"status exit={proc.returncode}"
         except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
             return "unknown", "status check timeout"
+        except asyncio.CancelledError:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            raise
         except Exception as exc:
             return "unknown", f"status check error={type(exc).__name__}"
 
@@ -474,6 +489,7 @@ class HLSProxyCoreMixin:
 
     async def _run_warp_control(self, action: str) -> int:
         """Run the explicit userspace WARP control action."""
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "/bin/sh",
@@ -484,8 +500,22 @@ class HLSProxyCoreMixin:
             )
             return await asyncio.wait_for(proc.wait(), timeout=20)
         except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
             logger.warning("WARP control %s timed out", action)
             return 124
+        except asyncio.CancelledError:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            raise
         except OSError as exc:
             logger.warning("WARP control %s failed: %s", action, exc)
             return 127

@@ -1021,6 +1021,10 @@
             return date.toLocaleString();
         }
 
+        function escHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
         function getStatusBadge(status, isActive) {
             if (isActive) {
                 return '<span class="status-badge status-recording">Recording</span>';
@@ -1031,7 +1035,7 @@
                 'failed': 'status-failed'
             };
             const cls = map[status] || '';
-            return `<span class="status-badge ${cls}">${status || 'unknown'}</span>`;
+            return `<span class="status-badge ${cls}">${escHtml(status || 'unknown')}</span>`;
         }
 
         async function loadRecordings() {
@@ -1085,26 +1089,27 @@
                 }
 
                 listEl.innerHTML = recordings.map(rec => `
-                    <div class="recording-item" data-id="${rec.id}">
+                    <div class="recording-item" data-id="${escHtml(rec.id)}">
                         <div class="recording-info">
-                            <h3>${rec.name || 'Unnamed Recording'}</h3>
+                            <h3>${escHtml(rec.name || 'Unnamed Recording')}</h3>
                             <div class="recording-meta">
                                 ${getStatusBadge(rec.status, rec.is_active)}
                                 <span>Started: ${formatDate(rec.started_at)}</span>
                                 ${rec.is_active ? `<span>Elapsed: ${formatDuration(rec.elapsed_seconds)}</span>` : ''}
                                 ${rec.duration_seconds ? `<span>Duration: ${formatDuration(rec.duration_seconds)}</span>` : ''}
                                 ${rec.file_size_bytes ? `<span>Size: ${formatBytes(rec.file_size_bytes)}</span>` : ''}
+                                ${rec.error_message ? `<span style="color: var(--accent-error)">${escHtml(rec.error_message)}</span>` : ''}
                             </div>
                         </div>
                         <div class="recording-actions">
                             ${rec.is_active ? `
-                                <button class="btn btn-danger btn-sm" onclick="stopRecording('${rec.id}')">Stop</button>
+                                <button class="btn btn-danger btn-sm" data-id="${escHtml(rec.id)}" onclick="stopRecording(this.dataset.id)">Stop</button>
                             ` : `
                                 ${rec.file_size_bytes ? `
-                                    <a href="/api/recordings/${rec.id}/stream${getAuthParams()}" target="_blank" class="btn btn-secondary btn-sm">Play</a>
-                                    <a href="/api/recordings/${rec.id}/download${getAuthParams()}" class="btn btn-secondary btn-sm">Download</a>
+                                    <a href="/api/recordings/${encodeURIComponent(rec.id)}/stream${getAuthParams()}" target="_blank" class="btn btn-secondary btn-sm">Play</a>
+                                    <a href="/api/recordings/${encodeURIComponent(rec.id)}/download${getAuthParams()}" class="btn btn-secondary btn-sm">Download</a>
                                 ` : ''}
-                                <button class="btn btn-danger btn-sm" onclick="openDeleteModal('${rec.id}')">Delete</button>
+                                <button class="btn btn-danger btn-sm" data-id="${escHtml(rec.id)}" onclick="openDeleteModal(this.dataset.id)">Delete</button>
                             `}
                         </div>
                     </div>

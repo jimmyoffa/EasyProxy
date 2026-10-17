@@ -114,7 +114,7 @@ def should_use_short_captured_manifest_urls(original_url: str, host_param: str) 
         or "vixsrc" in original
         or "vixcloud" in original
         or "streamvix" in original
-        or host in {"city", "cinemacity", "vixsrc", "vixcloud", "streamvix"}
+        or host in {"city", "cinemacity", "vixsrc", "vixcloud", "streamvix", "vidxgo"}
     )
 
 

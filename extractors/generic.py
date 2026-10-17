@@ -5,8 +5,8 @@ import yarl
 from extractors.base import BaseExtractor, ExtractorError
 
 class GenericHLSExtractor(BaseExtractor):
-    def __init__(self, request_headers, proxies=None):
-        super().__init__(request_headers, proxies, extractor_name="generic")
+    def __init__(self, request_headers, proxies=None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="generic", bypass_warp=bypass_warp)
         # Overwrite _get_session to include the specific SSL context needed for generic streams
         self._original_get_session = self._get_session
 

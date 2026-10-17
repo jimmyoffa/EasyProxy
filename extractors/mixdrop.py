@@ -29,7 +29,7 @@ class MixdropExtractor(BaseExtractor):
             cls._result_cache.pop(oldest, None)
 
     def __init__(self, request_headers: dict = None, proxies: list = None, bypass_warp: bool = False):
-        super().__init__(request_headers or {}, proxies, extractor_name="mixdrop")
+        super().__init__(request_headers or {}, proxies, extractor_name="mixdrop", bypass_warp=bypass_warp)
         self.request_headers = request_headers or {}
         self.base_headers = self.request_headers.copy()
         if "User-Agent" not in self.base_headers and "user-agent" not in self.base_headers:
@@ -75,12 +75,13 @@ class MixdropExtractor(BaseExtractor):
             result, timestamp = MixdropExtractor._result_cache[cache_key]
             if time.time() - timestamp < MixdropExtractor._cache_ttl:
                 logger.info(f"🚀 [Cache Hit] Using cached extraction result for: {normalized_url}")
-                return result
+                self.last_used_proxy = result.get("selected_proxy")
+                return dict(result)
 
         logger.info(f"🔍 [Cache Miss] Extracting new link for: {normalized_url}")
         await self._resolve_proxy(normalized_url)
         try:
-            ua, cookies = self.base_headers.get("User-Agent"), {}
+            ua = self.base_headers.get("User-Agent")
             parsed = urlparse(url)
             path = parsed.path.rstrip("/")
             for old in ("/f/", "/mix/", "/emb/"):
@@ -99,8 +100,9 @@ class MixdropExtractor(BaseExtractor):
                     return None
                 return {"http": pref_p, "https": pref_p}
 
-            async def solve_url(current_url, depth=0):
+            async def solve_url(current_url, depth=0, task_cookies=None):
                 if depth > 3: return None
+                local_cookies = dict(task_cookies) if task_cookies else {}
                 try:
                     m_headers = self._step_headers(ua, current_url)
                     pref_p = await self._resolve_proxy(current_url)
@@ -131,7 +133,7 @@ class MixdropExtractor(BaseExtractor):
                         if not res or not res[0]:
                             return None
                         html, final_url, ua_res, new_cookies = res
-                        cookies.update(new_cookies)
+                        local_cookies.update(new_cookies)
                         
                         if "eval(function(p,a,c,k,e,d)" in html:
                             for block in re.findall(r'eval\(function\(p,a,c,k,e,d\).*?\}\(.*\)\)', html, re.S):
@@ -149,13 +151,13 @@ class MixdropExtractor(BaseExtractor):
                             if match:
                                 v_url = match.group(1)
                                 if v_url.startswith("//"): v_url = "https:" + v_url
-                                return self._build_result(v_url, final_url, ua_res, cookies=cookies)
+                                return self._build_result(v_url, final_url, ua_res, cookies=local_cookies, selected_proxy=pref_p)
 
                         soup = BeautifulSoup(html, "lxml")
                         iframe = soup.find("iframe", src=re.compile(r'/e/|/emb', re.I))
                         if iframe:
                             iframe_url = urljoin(final_url, iframe["src"])
-                            return await solve_url(iframe_url, depth + 1)
+                            return await solve_url(iframe_url, depth + 1, local_cookies)
 
                         return None
 
@@ -173,9 +175,10 @@ class MixdropExtractor(BaseExtractor):
                 for mt in asyncio.as_completed(mirror_tasks):
                     result = await mt
                     if result:
-                        MixdropExtractor._result_cache[cache_key] = (result, time.time())
+                        self.last_used_proxy = result.get("selected_proxy")
+                        MixdropExtractor._result_cache[cache_key] = (dict(result), time.time())
                         MixdropExtractor._prune_result_cache()
-                        return result
+                        return dict(result)
             finally:
                 for mt in mirror_tasks:
                     if not mt.done():
@@ -186,11 +189,12 @@ class MixdropExtractor(BaseExtractor):
         finally:
             pass
 
-    def _build_result(self, video_url: str, referer: str, ua: str, cookies: dict = None) -> dict:
+    def _build_result(self, video_url: str, referer: str, ua: str, cookies: dict = None, selected_proxy: str | None = None) -> dict:
         headers = {"Referer": referer, "User-Agent": ua, "Origin": f"https://{urlparse(referer).netloc}"}
         if cookies:
             headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-        return {"destination_url": video_url, "request_headers": headers, "mediaflow_endpoint": self.mediaflow_endpoint, "bypass_warp": self.bypass_warp_active, "selected_proxy": self.last_used_proxy, "force_direct": self._force_direct}
+        proxy = self.last_used_proxy if selected_proxy is None and not self._force_direct else selected_proxy
+        return {"destination_url": video_url, "request_headers": headers, "mediaflow_endpoint": self.mediaflow_endpoint, "bypass_warp": self.bypass_warp_active, "selected_proxy": proxy, "force_direct": self._force_direct}
 
     async def close(self):
         pass

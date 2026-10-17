@@ -225,6 +225,14 @@ async def run_ctl(slot: str, action: str, timeout: float = 30.0) -> tuple[int, s
             except Exception:
                 pass
         return 124, f"wireproxy {action} timed out"
+    except asyncio.CancelledError:
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
     except OSError as exc:
         return 126, f"wireproxy {action} failed to start: {exc}"
     return proc.returncode or 0, (out or b"").decode("utf-8", "replace").strip()

@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 class OrionExtractor(BaseExtractor):
     """Extractor for Orionoid streams to ensure correct headers are passed."""
     
-    def __init__(self, request_headers, proxies=None):
-        super().__init__(request_headers, proxies, extractor_name="orion")
+    def __init__(self, request_headers, proxies=None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="orion", bypass_warp=bypass_warp)
         self.request_headers = request_headers
         self.base_headers = {
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -18,6 +18,7 @@ class OrionExtractor(BaseExtractor):
 
     async def extract(self, url, **kwargs):
         self._apply_routing_kwargs(url, kwargs)
+        await self._resolve_proxy(url)
         parsed_url = urlparse(url)
         origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
         

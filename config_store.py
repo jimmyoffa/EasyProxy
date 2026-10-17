@@ -72,94 +72,106 @@ DEFAULT_CONFIG = {
     "log_level": "WARNING",
 }
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _config_data = None
 
 
 def _load():
     global _config_data
-    os.makedirs(_CONFIG_DIR, exist_ok=True)
-    if os.path.exists(_CONFIG_FILE):
-        try:
-            with open(_CONFIG_FILE, "r") as f:
-                data = json.load(f)
-            merged = dict(DEFAULT_CONFIG)
-            merged.update(data)
-            # ponytail: merge default list keys to ensure mandatory exclusions are always present
-            for list_key in ["warp_exclude_domains", "warp_off_extractors", "proxy_off_extractors"]:
-                if list_key in data and list_key in DEFAULT_CONFIG:
-                    combined = list(DEFAULT_CONFIG[list_key])
-                    for item in data[list_key]:
+    with _lock:
+        os.makedirs(_CONFIG_DIR, exist_ok=True)
+        if os.path.exists(_CONFIG_FILE):
+            try:
+                with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                merged = dict(DEFAULT_CONFIG)
+                merged.update(data)
+                # ponytail: merge default warp_exclude_domains so mandatory debrid exclusions are always present
+                if "warp_exclude_domains" in data:
+                    combined = list(DEFAULT_CONFIG["warp_exclude_domains"])
+                    for item in data["warp_exclude_domains"]:
                         if item not in combined:
                             combined.append(item)
-                    merged[list_key] = combined
-            _config_data = merged
-            logger.debug("Loaded config from %s", _CONFIG_FILE)
-            return
-        except Exception as e:
-            logger.warning("Failed to load config.json: %s", e)
-    _config_data = dict(DEFAULT_CONFIG)
-    _save()
+                    merged["warp_exclude_domains"] = combined
+                _config_data = merged
+                logger.debug("Loaded config from %s", _CONFIG_FILE)
+                return
+            except Exception as e:
+                logger.warning("Failed to load config.json: %s", e)
+                if _config_data is None:
+                    _config_data = dict(DEFAULT_CONFIG)
+                return
+        _config_data = dict(DEFAULT_CONFIG)
+        _save()
 
 
 def _save():
-    if _config_data is None:
-        return
-    try:
-        os.makedirs(_CONFIG_DIR, exist_ok=True)
-        with open(_CONFIG_FILE, "w") as f:
-            json.dump(_config_data, f, indent=2)
-    except Exception as e:
-        logger.error("Failed to save config.json: %s", e)
+    with _lock:
+        if _config_data is None:
+            return
+        tmp_file = f"{_CONFIG_FILE}.tmp.{os.getpid()}.{threading.get_ident()}"
+        try:
+            os.makedirs(_CONFIG_DIR, exist_ok=True)
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(_config_data, f, indent=2)
+            os.replace(tmp_file, _CONFIG_FILE)
+        except Exception as e:
+            logger.error("Failed to save config.json: %s", e)
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except OSError:
+                pass
 
 
 def get(key, default=None):
-    if _config_data is None:
-        _load()
     with _lock:
+        if _config_data is None:
+            _load()
         return _config_data.get(key, default)
 
 
 def set(key, value):
-    if _config_data is None:
-        _load()
     with _lock:
+        if _config_data is None:
+            _load()
         _config_data[key] = value
-    _save()
+        _save()
 
 
 def get_all():
-    if _config_data is None:
-        _load()
     with _lock:
+        if _config_data is None:
+            _load()
         return dict(_config_data)
 
 
 def update(values: dict):
-    if _config_data is None:
-        _load()
     with _lock:
+        if _config_data is None:
+            _load()
         _config_data.update(values)
-    _save()
+        _save()
 
 
 def replace_all(data: dict):
     """Replace entire config with new data (merged with defaults)."""
     global _config_data
-    if _config_data is None:
-        _load()
-    merged = dict(DEFAULT_CONFIG)
-    merged.update(data)
     with _lock:
+        if _config_data is None:
+            _load()
+        merged = dict(DEFAULT_CONFIG)
+        merged.update(data)
         _config_data = merged
-    _save()
+        _save()
+
 
 def delete(key):
-    if _config_data is None:
-        _load()
     with _lock:
+        if _config_data is None:
+            _load()
         _config_data.pop(key, None)
-    _save()
+        _save()
 
 
 _load()

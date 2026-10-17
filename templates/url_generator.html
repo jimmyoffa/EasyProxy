@@ -1088,6 +1088,8 @@
             if (!destinationUrl) {
                 result.value = 'Please enter a valid destination URL.';
                 document.getElementById('proxyUrlList')?.replaceChildren();
+                const playBtn = document.getElementById('playProxyResult');
+                if (playBtn) playBtn.style.display = 'none';
                 return;
             }
 

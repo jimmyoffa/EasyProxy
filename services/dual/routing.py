@@ -69,8 +69,16 @@ class RoutingOptions:
         # Explicit proxies command over WARP. proxy=off must disable even a
         # forced proxy so the resolver can select WARP instead.
         # ponytail: proxy_exclude_domains drops even explicit ?proxy= (WARP exempt)
-        if config_module.effective_forced_proxy(url, self.forced_proxy) and not bypass_proxies:
-            return self.forced_proxy
+        effective_forced = config_module.effective_forced_proxy(url, self.forced_proxy)
+        if effective_forced and config_module.is_warp_proxy_url(effective_forced):
+            if (
+                bypass_warp
+                or not config_module._get_dynamic_warp_enabled()
+                or config_module._is_warp_excluded(url or "")
+            ):
+                effective_forced = None
+        if effective_forced and not bypass_proxies:
+            return effective_forced
 
         bypass_proxies = bypass_proxies or config_module._is_proxy_excluded(url or "")
 

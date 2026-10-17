@@ -14,8 +14,8 @@ class TurboVidPlayExtractor(BaseExtractor):
         "turbovidhls.com",
     ]
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="turbovidplay")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="turbovidplay", bypass_warp=bypass_warp)
 
     def _get_origin(self, url: str) -> str:
         """Get origin from URL."""

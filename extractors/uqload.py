@@ -40,8 +40,8 @@ class UqloadExtractor(BaseExtractor):
         r'(?:https?://[a-z0-9.-]*uqload[a-z.]*)/[a-z0-9/]+\.mp4[^"\'<\s]*',  # raw mp4 URL on page
     ]
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="uqload")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="uqload", bypass_warp=bypass_warp)
 
     @classmethod
     def _find_source(cls, text: str) -> str | None:

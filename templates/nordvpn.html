@@ -283,13 +283,17 @@ async function saveToken() {
     }
 }
 
+function escHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 async function loadCountries() {
     try {
         const data = await api('/api/admin/wg/nordvpn/countries');
         const select = document.getElementById('country');
         const previous = select.value;
         select.innerHTML = '<option value="">All countries</option>' + data.countries.map(country =>
-            '<option value="' + country.code + '">' + country.name + ' (' + country.servers + ')</option>'
+            '<option value="' + escHtml(country.code) + '">' + escHtml(country.name) + ' (' + escHtml(country.servers) + ')</option>'
         ).join('');
         select.value = previous;
         loadServers();
@@ -307,13 +311,13 @@ async function loadServers() {
         document.getElementById('servers-info').textContent =
             data.total + ' WireGuard servers' + (data.total > data.servers.length ? ' (showing the ' + data.servers.length + ' with the lowest load)' : '') + '.';
         list.innerHTML = data.servers.map(server => {
-            const load = Math.min(100, server.load);
+            const load = Math.min(100, Number(server.load) || 0);
             const level = load >= 70 ? 'high' : (load >= 40 ? 'medium' : '');
             return '<div class="server-row">' +
-                '<div class="name">' + server.hostname + '<small>' + (server.city || server.country) + ' &middot; ' + server.ip + '</small></div>' +
+                '<div class="name">' + escHtml(server.hostname) + '<small>' + escHtml(server.city || server.country) + ' &middot; ' + escHtml(server.ip) + '</small></div>' +
                 '<div class="load ' + level + '"><span style="width:' + load + '%"></span></div>' +
                 '<span class="hint">' + load + '%</span>' +
-                '<button class="btn btn-sm btn-primary" data-server="' + server.hostname + '">Connect</button>' +
+                '<button class="btn btn-sm btn-primary" data-server="' + escHtml(server.hostname) + '">Connect</button>' +
                 '</div>';
         }).join('') || '<div class="server-row"><span class="hint">No server matches this filter.</span></div>';
     } catch (error) {

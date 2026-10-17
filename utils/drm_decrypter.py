@@ -199,8 +199,13 @@ class MP4Decrypter:
         # offset and any following sidx reference must account for them.
         self._moof_removed_overhead = 0
         self.track_kid_map = {}  # track_id -> KID (bytes) from tenc box
+        self.track_iv_size_map = {}  # track_id -> per-sample IV size (0, 8, 16) from tenc box
+        self.track_constant_iv_map = {}  # track_id -> constant IV (bytes) from tenc box
+        self.track_default_sample_size_map = {}  # track_id -> default_sample_size from mvex/trex
         self._last_extracted_kid = None  # temp storage during moov processing
-        self._default_sample_size = 0  # from tfhd, used when trun lacks sample-size-present
+        self._last_extracted_iv_size = None
+        self._last_extracted_constant_iv = b""
+        self._default_sample_size = 0  # from tfhd/trex, used when trun lacks sample-size-present
 
     def decrypt_segment(self, combined_segment: bytes, init_length: int = 0) -> bytes:
         """
@@ -290,6 +295,15 @@ class MP4Decrypter:
             if atom.atom_type == b"trak":
                 new_trak = self._process_trak(atom)
                 new_moov_data.extend(new_trak.pack())
+            elif atom.atom_type == b"mvex":
+                mvex_parser = MP4Parser(atom.data)
+                for mvex_atom in iter(mvex_parser.read_atom, None):
+                    if mvex_atom.atom_type == b"trex" and len(mvex_atom.data) >= 20:
+                        trex_track_id = struct.unpack_from(">I", mvex_atom.data, 4)[0]
+                        trex_default_size = struct.unpack_from(">I", mvex_atom.data, 16)[0]
+                        if trex_default_size:
+                            self.track_default_sample_size_map[trex_track_id] = trex_default_size
+                new_moov_data.extend(atom.pack())
             elif atom.atom_type != b"pssh":
                 # Skip PSSH boxes as they are not needed in the decrypted output
                 new_moov_data.extend(atom.pack())
@@ -348,11 +362,21 @@ class MP4Decrypter:
     def _process_traf(self, traf: MP4Atom) -> MP4Atom:
         parser = MP4Parser(traf.data)
         new_traf_data = bytearray()
-        tfhd = None
         sample_count = 0
         sample_info = []
 
         atoms = parser.list_atoms()
+        tfhd = next((a for a in atoms if a.atom_type == b"tfhd"), None)
+        tfhd_track_id = (
+            struct.unpack_from(">I", tfhd.data, 4)[0]
+            if tfhd is not None and len(tfhd.data) >= 8
+            else None
+        )
+        tfhd_sample_size = self._parse_tfhd_default_sample_size(tfhd) if tfhd is not None else 0
+        self._default_sample_size = (
+            tfhd_sample_size
+            or (self.track_default_sample_size_map.get(tfhd_track_id, 0) if tfhd_track_id is not None else 0)
+        )
 
         self.encryption_overhead = self._moof_removed_overhead + sum(
             a.size for a in atoms if a.atom_type in {b"senc", b"saiz", b"saio", b"sbgp", b"sgpd"}
@@ -360,20 +384,24 @@ class MP4Decrypter:
 
         for atom in atoms:
             if atom.atom_type == b"tfhd":
-                tfhd = atom
-                self._default_sample_size = self._parse_tfhd_default_sample_size(tfhd)
                 new_traf_data.extend(atom.pack())
             elif atom.atom_type == b"trun":
                 sample_count = self._process_trun(atom)
                 new_trun = self._modify_trun(atom)
                 new_traf_data.extend(new_trun.pack())
             elif atom.atom_type == b"senc":
-                sample_info = self._parse_senc(atom, sample_count)
+                track_iv_size = self.track_iv_size_map.get(tfhd_track_id) if tfhd_track_id is not None else None
+                track_const_iv = self.track_constant_iv_map.get(tfhd_track_id, b"") if tfhd_track_id is not None else b""
+                sample_info = self._parse_senc(
+                    atom,
+                    sample_count,
+                    iv_size=track_iv_size,
+                    constant_iv=track_const_iv,
+                )
             elif atom.atom_type not in {b"saiz", b"saio", b"sbgp", b"sgpd"}:
                 new_traf_data.extend(atom.pack())
 
-        if tfhd:
-            tfhd_track_id = struct.unpack_from(">I", tfhd.data, 4)[0]
+        if tfhd_track_id is not None:
             self.current_key = self._get_key_for_track(tfhd_track_id)
             self.current_sample_info = sample_info
 
@@ -409,51 +437,82 @@ class MP4Decrypter:
 
         return MP4Atom(b"mdat", len(decrypted_samples) + 8, decrypted_samples)
 
-    def _parse_senc(self, senc: MP4Atom, sample_count: int) -> list[CENCSampleAuxiliaryDataFormat]:
+    @staticmethod
+    def _parse_senc_entries(
+        data: memoryview,
+        position: int,
+        sample_count: int,
+        flags: int,
+        iv_size: int,
+        constant_iv: bytes = b"",
+    ) -> tuple[list[CENCSampleAuxiliaryDataFormat], int, bool]:
+        sample_info = []
+        for _ in range(sample_count):
+            if iv_size == 0:
+                iv = constant_iv
+            else:
+                if position + iv_size > len(data):
+                    return sample_info, position, False
+                iv = data[position : position + iv_size].tobytes()
+                position += iv_size
+
+            sub_samples = []
+            if flags & 0x000002:
+                if position + 2 > len(data):
+                    return sample_info, position, False
+                subsample_count = struct.unpack_from(">H", data, position)[0]
+                position += 2
+                if position + subsample_count * 6 > len(data):
+                    return sample_info, position, False
+                for _ in range(subsample_count):
+                    clear_bytes, encrypted_bytes = struct.unpack_from(">HI", data, position)
+                    position += 6
+                    sub_samples.append((clear_bytes, encrypted_bytes))
+
+            sample_info.append(CENCSampleAuxiliaryDataFormat(True, iv, sub_samples))
+        return sample_info, position, position == len(data) and len(sample_info) == sample_count
+
+    def _parse_senc(
+        self,
+        senc: MP4Atom,
+        sample_count: int,
+        iv_size: Optional[int] = None,
+        constant_iv: bytes = b"",
+    ) -> list[CENCSampleAuxiliaryDataFormat]:
         """
         Parses the 'senc' (Sample Encryption) atom, which contains encryption information for samples.
         This includes initialization vectors (IVs) and sub-sample encryption data.
-
-        Args:
-            senc (MP4Atom): The 'senc' atom to parse.
-            sample_count (int): The number of samples.
-
-        Returns:
-            list[CENCSampleAuxiliaryDataFormat]: List of sample auxiliary data formats with encryption information.
         """
         data = memoryview(senc.data)
+        if len(data) < 4:
+            return []
         version_flags = struct.unpack_from(">I", data, 0)[0]
         version, flags = version_flags >> 24, version_flags & 0xFFFFFF
         position = 4
 
         if version == 0:
+            if len(data) < 8:
+                return []
             sample_count = struct.unpack_from(">I", data, position)[0]
             position += 4
 
-        sample_info = []
-        for _ in range(sample_count):
-            if position + 8 > len(data):
-                break
+        if iv_size in (0, 8, 16):
+            entries, _, _ = self._parse_senc_entries(
+                data, position, sample_count, flags, iv_size, constant_iv
+            )
+            return entries
 
-            iv = data[position : position + 8].tobytes()
-            position += 8
-
-            sub_samples = []
-            if flags & 0x000002 and position + 2 <= len(data):  # Check if subsample information is present
-                subsample_count = struct.unpack_from(">H", data, position)[0]
-                position += 2
-
-                for _ in range(subsample_count):
-                    if position + 6 <= len(data):
-                        clear_bytes, encrypted_bytes = struct.unpack_from(">HI", data, position)
-                        position += 6
-                        sub_samples.append((clear_bytes, encrypted_bytes))
-                    else:
-                        break
-
-            sample_info.append(CENCSampleAuxiliaryDataFormat(True, iv, sub_samples))
-
-        return sample_info
+        entries_8, _, exact_8 = self._parse_senc_entries(
+            data, position, sample_count, flags, 8, constant_iv
+        )
+        if exact_8:
+            return entries_8
+        entries_16, _, exact_16 = self._parse_senc_entries(
+            data, position, sample_count, flags, 16, constant_iv
+        )
+        if exact_16:
+            return entries_16
+        return entries_8
 
     def _get_key_for_track(self, track_id: int) -> bytes:
         """
@@ -662,6 +721,8 @@ class MP4Decrypter:
                 break
 
         self._last_extracted_kid = None
+        self._last_extracted_iv_size = None
+        self._last_extracted_constant_iv = b""
 
         for atom in atoms:
             if atom.atom_type == b"mdia":
@@ -670,9 +731,14 @@ class MP4Decrypter:
             else:
                 new_trak_data.extend(atom.pack())
 
-        # Store KID mapping for this track (extracted from tenc inside sinf)
-        if track_id is not None and self._last_extracted_kid is not None:
-            self.track_kid_map[track_id] = self._last_extracted_kid
+        # Store KID and IV mapping for this track (extracted from tenc inside sinf)
+        if track_id is not None:
+            if self._last_extracted_kid is not None:
+                self.track_kid_map[track_id] = self._last_extracted_kid
+            if self._last_extracted_iv_size is not None:
+                self.track_iv_size_map[track_id] = self._last_extracted_iv_size
+            if self._last_extracted_constant_iv:
+                self.track_constant_iv_map[track_id] = self._last_extracted_constant_iv
 
         return MP4Atom(b"trak", len(new_trak_data) + 8, new_trak_data)
 
@@ -844,9 +910,13 @@ class MP4Decrypter:
             if atom.atom_type == b"schi":
                 schi_parser = MP4Parser(atom.data)
                 for schi_atom in iter(schi_parser.read_atom, None):
-                    if schi_atom.atom_type == b"tenc" and len(schi_atom.data) >= 24:
-                        if schi_atom.data[0] == 1 and len(schi_atom.data) >= 20:
-                            return bytes(schi_atom.data[4:20])
+                    if schi_atom.atom_type == b"tenc" and len(schi_atom.data) >= 24 and schi_atom.data[0] in (0, 1):
+                        iv_size = schi_atom.data[7]
+                        self._last_extracted_iv_size = iv_size
+                        if iv_size == 0 and len(schi_atom.data) >= 25:
+                            const_iv_size = schi_atom.data[24]
+                            if len(schi_atom.data) >= 25 + const_iv_size:
+                                self._last_extracted_constant_iv = bytes(schi_atom.data[25 : 25 + const_iv_size])
                         return bytes(schi_atom.data[8:24])
         return None
 

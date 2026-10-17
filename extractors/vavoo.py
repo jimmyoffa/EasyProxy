@@ -33,8 +33,8 @@ _REGION = "DE"
 class VavooExtractor(BaseExtractor):
     """Vavoo URL extractor — resolves vavoo.to play URLs to clean HLS via lokke.app auth."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vavoo")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vavoo", bypass_warp=bypass_warp)
         self.request_headers = request_headers
         self.base_headers = {
             "user-agent": "okhttp/4.11.0"
@@ -46,6 +46,7 @@ class VavooExtractor(BaseExtractor):
         self._proxy = None  # scelto una volta, non cambia
         self.addon_sig = None
         self.addon_sig_ts = 0
+        self._addon_sig_proxy = None
         self.base_index = 0
 
     @property
@@ -100,23 +101,18 @@ class VavooExtractor(BaseExtractor):
                 direct_allowed,
             )
 
-            if (
-                self.session is not None
-                and not self.session.closed
-                and self._proxy == selected_proxy
-            ):
-                return self.session
-
-            if self.session is not None and not self.session.closed:
-                await self.session.close()
-            self.session = None
             self._proxy = selected_proxy
             self.last_used_proxy = selected_proxy
 
-            if self._proxy is None and not direct_allowed:
+            if self._proxy is None and not self._force_direct and not direct_allowed:
                 raise ClientConnectionError(
                     "Vavoo: direct fallback disabled; no proxy route available"
                 )
+
+            session = self._route_sessions.get(selected_proxy)
+            if session is not None and not session.closed:
+                self.session = session
+                return self.session
 
             timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
@@ -143,6 +139,7 @@ class VavooExtractor(BaseExtractor):
                 connector=connector,
                 headers={'User-Agent': self.base_headers["user-agent"]}
             )
+            self._route_sessions[selected_proxy] = self.session
         return self.session
 
     async def _get_external_ip(self) -> Optional[str]:
@@ -245,19 +242,23 @@ class VavooExtractor(BaseExtractor):
         return None
 
     async def _get_sig(self, force: bool = False) -> Optional[str]:
+        await self._get_session()
         now = time.time()
-        if self.addon_sig and not force and (now - self.addon_sig_ts < _TOKEN_REFRESH_AGE):
+        proxy_changed = getattr(self, "_addon_sig_proxy", None) != self._proxy
+        if self.addon_sig and not force and not proxy_changed and (now - self.addon_sig_ts < _TOKEN_REFRESH_AGE):
             return self.addon_sig
         sig = await self._fetch_addon_sig()
         if not sig:
-            if self.addon_sig:
+            if self.addon_sig and not proxy_changed:
                 logger.warning("Vavoo token refresh failed, reusing old addonSig")
-            return self.addon_sig
+                return self.addon_sig
+            return None
         client_ip = await self._get_external_ip()
         if client_ip:
             sig = self._rewrite_addon_sig_ip(sig, client_ip)
         self.addon_sig = sig
         self.addon_sig_ts = now
+        self._addon_sig_proxy = self._proxy
         logger.info("Vavoo addonSig obtained")
         return sig
 
@@ -352,6 +353,11 @@ class VavooExtractor(BaseExtractor):
 
     async def close(self):
         async with self._session_lock:
-            if self.session and not self.session.closed:
-                await self.session.close()
+            sessions = set(self._route_sessions.values())
+            if self.session is not None:
+                sessions.add(self.session)
+            for session in sessions:
+                if not session.closed:
+                    await session.close()
+            self._route_sessions.clear()
             self.session = None

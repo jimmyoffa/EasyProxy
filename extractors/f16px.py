@@ -187,8 +187,8 @@ class F16PxExtractor(BaseExtractor):
     POW_MAX_WORKERS = 4  # fallback only; Node/V8 is the primary solver
     ERROR_PREFIX = "F16PX"
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="f16px")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="f16px", bypass_warp=bypass_warp)
 
     def _error(self, message: str) -> ExtractorError:
         return ExtractorError(f"{self.ERROR_PREFIX}: {message}")

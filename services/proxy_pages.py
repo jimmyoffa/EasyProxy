@@ -682,9 +682,9 @@ class HLSProxyPagesMixin:
                 "/proxy/hls/segment.{format}": {
                     "get": {
                         "summary": "HLS segment compatibility",
-                        "description": "Serve HLS segments (ts, m4s, mp4, vtt) through the proxy with proper headers.",
+                        "description": "Serve HLS segments (ts, m4s, mp4, vtt, aac, mp3, m4a, ac3, ec3) through the proxy with proper headers.",
                         "parameters": [
-                            {"name": "format", "in": "path", "schema": {"type": "string", "enum": ["ts", "m4s", "mp4", "vtt"]}, "required": True},
+                            {"name": "format", "in": "path", "schema": {"type": "string", "enum": ["ts", "m4s", "mp4", "vtt", "aac", "mp3", "m4a", "ac3", "ec3"]}, "required": True},
                         ],
                         "responses": {"200": {"description": "Segment data"}},
                     }
@@ -1237,35 +1237,25 @@ class HLSProxyPagesMixin:
             return web.Response(text=str(e), status=500)
 
     async def handle_proxy_ip(self, request):
-        """Restituisce l'indirizzo IP pubblico del server (o del proxy se configurato)."""
+        """Restituisce l'indirizzo IP pubblico reale del server (connessione diretta)."""
         if not check_password(request):
             return web.Response(status=401, text="Unauthorized: Invalid API Password")
 
+        target_url = "https://api.ipify.org?format=json"
         try:
-            # Usa un proxy globale se configurato, altrimenti connessione diretta
-            proxy = random.choice(_shared.GLOBAL_PROXIES) if _shared.GLOBAL_PROXIES else None
-
-            # Crea una sessione dedicata con il proxy configurato
-            if proxy:
-                logger.info(f"[NET] Checking IP via proxy: {proxy}")
-                connector = get_connector_for_proxy(proxy)
-            else:
-                connector = TCPConnector()
-
             timeout = ClientTimeout(total=10)
-            async with ClientSession(timeout=timeout, connector=connector) as session:
-                # Usa un servizio esterno per determinare l'IP pubblico
-                async with session.get("https://api.ipify.org?format=json") as resp:
+            async with ClientSession(timeout=timeout, connector=TCPConnector()) as session:
+                async with session.get(target_url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         return web.json_response(data)
-                    else:
-                        logger.error(f"❌ Failed to fetch IP: {resp.status}")
-                        return web.Response(text="Failed to fetch IP", status=502)
+                    logger.error(f"❌ Failed to fetch IP: HTTP {resp.status}")
+                    return web.Response(text=f"Failed to fetch IP (HTTP {resp.status})", status=502)
 
         except Exception as e:
-            logger.error(f"❌ Error fetching IP: {e}")
-            return web.Response(text=str(e), status=500)
+            err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            logger.error(f"❌ Error fetching IP: {err_msg}")
+            return web.Response(text=err_msg, status=500)
 
     async def handle_admin(self, request):
         if not check_password(request):

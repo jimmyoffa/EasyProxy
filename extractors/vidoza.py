@@ -5,8 +5,8 @@ from extractors.base import BaseExtractor, ExtractorError
 class VidozaExtractor(BaseExtractor):
     """Vidoza URL extractor."""
 
-    def __init__(self, request_headers: dict, proxies: list = None):
-        super().__init__(request_headers, proxies, extractor_name="vidoza")
+    def __init__(self, request_headers: dict, proxies: list = None, bypass_warp: bool = False):
+        super().__init__(request_headers, proxies, extractor_name="vidoza", bypass_warp=bypass_warp)
         self.mediaflow_endpoint = "proxy_stream_endpoint"
 
     async def extract(self, url: str, **kwargs) -> dict:

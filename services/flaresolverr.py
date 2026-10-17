@@ -181,9 +181,11 @@ class FlareSolverrManager:
             return
         task = self._output_task
         self._output_task = None
+        if not task.done():
+            task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, OSError):
+        except (asyncio.CancelledError, OSError, Exception):
             pass
 
     def _process_diagnostic(self) -> str:
@@ -271,9 +273,25 @@ class FlareSolverrManager:
         owns_process = self._owns_process
         self._owns_process = False
 
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
+        session = self._session
         self._session = None
+        if session is not None and not session.closed:
+            try:
+                await session.close()
+            except BaseException:
+                pass
+
+        # Collect descendant processes (Xvfb, chromedriver, chromium) BEFORE
+        # terminating the parent process, otherwise they get reparented to PID 1.
+        tracked_procs: dict[int, psutil.Process] = {}
+        if process and process.pid:
+            try:
+                parent_ps = psutil.Process(process.pid)
+                for child in parent_ps.children(recursive=True):
+                    tracked_procs[child.pid] = child
+                tracked_procs[parent_ps.pid] = parent_ps
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
 
         if process and owns_process and process.returncode is None:
             try:
@@ -281,37 +299,41 @@ class FlareSolverrManager:
                     os.killpg(process.pid, signal.SIGTERM)
                 else:
                     process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except (ProcessLookupError, asyncio.TimeoutError, OSError):
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except BaseException:
                 if process.returncode is None:
                     try:
                         if os.name != "nt":
                             os.killpg(process.pid, signal.SIGKILL)
                         else:
                             process.kill()
-                        await process.wait()
-                    except (ProcessLookupError, OSError):
+                        await asyncio.wait_for(process.wait(), timeout=2)
+                    except BaseException:
                         pass
 
-        await self._finish_process_output()
-
-        # FlareSolverr can leave Chromium outside its process group.  Only
-        # target its temporary browser profiles, never a user's normal browser.
-        browser_processes = []
-        for candidate in psutil.process_iter(["name", "cmdline"]):
+        # FlareSolverr can leave Chromium, chromedriver, or Xvfb outside its
+        # process group (or reparented after a cancelled solve).
+        for candidate in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
+                pid = candidate.info.get("pid")
+                if not pid or pid == os.getpid() or pid in tracked_procs:
+                    continue
                 command = " ".join(candidate.info.get("cmdline") or [])
                 lowered = command.lower()
                 name = (candidate.info.get("name") or "").lower()
-                if candidate.pid == os.getpid():
-                    continue
-                if "--user-data-dir=/tmp/" not in lowered:
-                    continue
-                if "chromium" in name or "chrome" in name or "chromedriver" in name:
-                    browser_processes.append(candidate)
+                is_flaresolverr = "flaresolverr.py" in lowered or "flaresolverr" in name
+                is_xvfb = name == "xvfb" or "/xvfb" in lowered or lowered.startswith("xvfb ")
+                is_chromedriver = "chromedriver" in name
+                is_temp_browser = (
+                    "--user-data-dir=/tmp/" in lowered
+                    and ("chromium" in name or "chrome" in name or "chromedriver" in name)
+                )
+                if is_flaresolverr or is_xvfb or is_chromedriver or is_temp_browser:
+                    tracked_procs[pid] = candidate
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
+        browser_processes = list(tracked_procs.values())
         for browser_process in browser_processes:
             try:
                 browser_process.terminate()
@@ -325,6 +347,8 @@ class FlareSolverrManager:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             psutil.wait_procs(alive, timeout=2)
+
+        await self._finish_process_output()
 
         if process and owns_process:
             logger.info("FlareSolverr terminato dopo il recupero dei cookie")
@@ -401,7 +425,14 @@ class FlareSolverrManager:
                 raise FlareSolverrError(f"Richiesta FlareSolverr fallita [{detail}]") from exc
             finally:
                 # Deliberately stop immediately after the solution is copied.
-                await self._stop()
+                # Shield cleanup so an outer timeout/cancellation cannot abort
+                # _stop() halfway and leave FlareSolverr/Xvfb/chromedriver alive.
+                stop_task = asyncio.create_task(self._stop())
+                try:
+                    await asyncio.shield(stop_task)
+                except BaseException:
+                    await asyncio.gather(stop_task, return_exceptions=True)
+                    raise
 
     async def shutdown(self) -> None:
         async with self._lock:

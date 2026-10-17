@@ -858,7 +858,7 @@ class ManifestRewriter:
                         )
                 else:
                     # Mantieni un endpoint coerente con il tipo reale del segmento
-                    path = urllib.parse.urlparse(absolute_url).path
+                    path = urllib.parse.urlparse(absolute_url).path.lower()
                     ext = ".ts"
                     if path.endswith(".vtt") or path.endswith(".webvtt"):
                         ext = ".vtt"
@@ -868,6 +868,11 @@ class ManifestRewriter:
                         or path.endswith(".m4v")
                     ):
                         ext = ".mp4"
+                    elif path.endswith((".aac", ".mp3", ".m4a", ".ac3", ".ec3")):
+                        # Keep the real audio extension: ffmpeg's extension_picky
+                        # rejects a .ts URL carrying raw AAC/MP3/AC-3 and aborts
+                        # the whole HLS input (no audio, endless buffering).
+                        ext = path[path.rfind("."):]
 
                     proxy_url = (
                         f"{proxy_base}/proxy/hls/segment{ext}?d={encoded_url}{header_params}"
