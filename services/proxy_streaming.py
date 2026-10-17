@@ -999,6 +999,37 @@ class HLSProxyStreamingMixin:
                     log_context(session_proxy),
                 )
 
+            # Premium edge playlists (daddylive/dlive.sx premiumtv player) need a
+            # per-viewer token that expires after a couple of minutes, otherwise
+            # the refresh answers 403 and the player loops the last window until
+            # it dies. Refresh it here, with the session that fetches the
+            # playlist, so the token matches this egress address.
+            from extractors.dlstreams import (
+                ensure_premium_playlist_url,
+                invalidate_premium_playlist_token,
+                premium_playlist_parts,
+            )
+            premium_route_key = session_proxy or "direct"
+            is_premium_manifest = (
+                not is_hls_segment_request
+                and "manifest.m3u8" in request.path
+                and premium_playlist_parts(stream_url) is not None
+            )
+            if is_premium_manifest:
+                try:
+                    stream_url = await ensure_premium_playlist_url(
+                        session,
+                        stream_url,
+                        headers,
+                        route_key=premium_route_key,
+                    )
+                except Exception as _pt_exc:
+                    logger.debug(
+                        "Premium playlist token refresh failed: %s [%s]",
+                        _pt_exc,
+                        log_context(session_proxy),
+                    )
+
             # ⚡ Parallel range fetch to beat per-connection CDN throttling (e.g. vidsonic:
             # ~1.7 Mbps/conn vs 2.4 Mbps video -> 3 parallel ranges -> ~5 Mbps aggregate).
             # Falls back transparently to the single-connection path when not applicable.
@@ -1335,6 +1366,34 @@ class HLSProxyStreamingMixin:
                                 headers=retry_headers,
                             )
                     if resp.status == 403 and ("manifest.m3u8" in request.path or "playlist" in request.path):
+                        # Premium playlist tokens are short-lived and IP-bound:
+                        # drop the cached one and retry once with a fresh token
+                        # before paying for a full re-extraction.
+                        if is_premium_manifest and not getattr(request, "_premium_token_retried", False):
+                            request._premium_token_retried = True
+                            invalidate_premium_playlist_token(stream_url, premium_route_key)
+                            fresh_url = await ensure_premium_playlist_url(
+                                session,
+                                stream_url,
+                                headers,
+                                force=True,
+                                route_key=premium_route_key,
+                            )
+                            if fresh_url != stream_url:
+                                logger.info(
+                                    "🔑 Premium playlist token refreshed, retrying manifest [%s]",
+                                    log_context(session_proxy),
+                                )
+                                return await self._proxy_stream(
+                                    request,
+                                    fresh_url,
+                                    stream_headers,
+                                    bypass_warp=bypass_warp,
+                                    forced_proxy=forced_proxy,
+                                    force_direct=force_direct,
+                                    extractor_key=extractor_key,
+                                    stream_key=stream_key,
+                                )
                         re_manifest_resp = await self._reextract_and_retry_manifest(
                             request, stream_url, headers, bypass_warp, forced_proxy, force_direct, disable_ssl, extractor_key, stream_key
                         )
